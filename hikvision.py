@@ -10,13 +10,14 @@ class Hikvision:
         self.basic_auth = HTTPBasicAuth("admin", "tvmix333")
         self.digest_auth = HTTPDigestAuth("admin", "tvmix333")
         self.current_password = ""
+        self.session = requests.Session()
 
     def user_check(self):
         with open("C:/Users/Huawei/PycharmProjects/HikvisionAutoConfig/venv/passwords.json", "r") as passwords:
             password_list = json.load(passwords)
 
         for password in password_list['values']:
-            response = requests.get(f"{self.basic_auth}Security/userCheck", auth=HTTPBasicAuth("admin", password))
+            response = self.session.get(f"{self.basic_auth}Security/userCheck", auth=HTTPBasicAuth("admin", password))
             if response.status_code == 200:
                 self.current_password = password
                 print(200, "OK")
@@ -32,7 +33,7 @@ class Hikvision:
     def change_password(self):
         data = {"User": {"id": "1", "userName": "admin", "password": "tvmix333"}}
         xml_data = xmltodict.unparse(data)
-        response = requests.put(f"{self.BaseAddress}Security/users/1", xml_data, auth=self.basic_auth)
+        response = self.session.put(f"{self.BaseAddress}Security/users/1", xml_data, auth=self.basic_auth)
         return response.status_code
 
     def to_json(self, response):
@@ -43,22 +44,51 @@ class Hikvision:
 
 class GetRequests(Hikvision):
     def device_info(self):
-        response = requests.get(f"{self.BaseAddress}System/deviceInfo", auth=self.basic_auth)
-
-        xml_dict = xmltodict.parse(response.content)
-        # print(json.dumps(xml_dict, indent=4))
-        device_info = json.loads(json.dumps(xml_dict))
-        serial_number = device_info['DeviceInfo']['serialNumber']
-        mac_address = device_info['DeviceInfo']['macAddress']
-        return serial_number, mac_address
+        response = self.session.get(f"{self.base_address}System/deviceInfo", auth=self.basic_auth)
+        return Hikvision().to_json(response)
 
     def get_eth_config(self):
-        response = requests.get(f"{self.base_address}System/Network/interfaces/1/ipAddress", auth=self.basic_auth)
+        response = self.session.get(f"{self.base_address}System/Network/interfaces/1/ipAddress", auth=self.basic_auth)
         json_response = Hikvision().to_json(response)
         return json_response
 
     def get_stream_config(self):
-        response = requests.get(f"{self.base_address}Streaming/channels/101", auth=self.basic_auth)
+        response = self.session.get(f"{self.base_address}Streaming/channels/101", auth=self.basic_auth)
+        return Hikvision().to_json(response)
+
+    def get_time_config(self):
+        response = self.session.get(f"{self.base_address}System/time", auth=self.basic_auth)
+        return Hikvision().to_json(response)
+
+    def get_ntp_config(self):
+        response = self.session.get(f"{self.base_address}System/time/NtpServers/1", auth=self.basic_auth)
+        return Hikvision().to_json(response)
+
+    def get_email_config(self):
+        response = self.session.get(f"{self.base_address}System/Network/mailing/1", auth=self.basic_auth)
+        return Hikvision().to_json(response)
+
+    def get_detection_config(self):
+        response = self.session.get(f"{self.base_address}System/Video/inputs/channels/1/motionDetection", auth=self.basic_auth)
+        return Hikvision().to_json(response)
+
+    def get_wifi_list(self):
+        response = self.session.get(f"{self.base_address}System/Network/interfaces/2/wireless/accessPointList", auth=self.basic_auth)
+        return Hikvision().to_json(response)
+
+    def get_osd_datetime_config(self):
+        response = self.session.get(f"{self.base_address}System/Video/inputs/channels/1/overlays/dateTimeOverlay",
+                                    auth=self.basic_auth)
+        return Hikvision().to_json(response)
+
+    def get_osd_channel_name_config(self):
+        response = self.session.get(f"{self.base_address}System/Video/inputs/channels/1/overlays/channelNameOverlay",
+                                    auth=self.basic_auth)
+        return Hikvision().to_json(response)
+
+    def get_event_notification_config(self):
+        response = self.session.get(f"{self.base_address}Event/triggers/VMD-1/notifications",
+                                    auth=self.basic_auth)
         return Hikvision().to_json(response)
 
 
@@ -131,6 +161,89 @@ class SetRequests(Hikvision):
         return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
 
 
+    def set_email_config(self):
+        device_info = GetRequests().device_info()
+        serial_number = device_info['DeviceInfo']['serialNumber']
+        cam_email = f"HK-{serial_number}@camera.ru"
+        xml_data = f'''
+                <mailing>
+                    <id>1</id>
+                    <sender>
+                        <emailAddress>{cam_email}</emailAddress>
+                        <name>camera</name>
+                        <smtp>
+                            <enableAuthorization>false</enableAuthorization>
+                            <enableSSL>false</enableSSL>
+                            <addressingFormatType>hostname</addressingFormatType>
+                            <hostName>alarm.profintel.ru</hostName>
+                            <portNo>15006</portNo>
+                            <accountName></accountName>
+                            <enableTLS>false</enableTLS>
+                            <startTLS>false</startTLS>
+                        </smtp>
+                    </sender>
+                    <receiverList>
+                        <receiver>
+                            <id>1</id>
+                            <name>camera</name>
+                            <emailAddress>{cam_email}</emailAddress>
+                        </receiver>
+                    </receiverList>
+                    <attachment>
+                        <snapshot>
+                            <enabled>false</enabled>
+                            <interval>2</interval>
+                        </snapshot>
+                    </attachment>
+                </mailing>'''
+
+        response = self.session.put(f"{self.base_address}System/Network/mailing/1", data=xml_data, auth=self.basic_auth)
+        json_response = Hikvision().to_json(response)
+        return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
+
+    def set_ntp_config(self):
+        xml_data = '''
+            <NTPServer>
+                <id>1</id>
+                <addressingFormatType>ipaddress</addressingFormatType>
+                <ipAddress>217.24.176.232</ipAddress>
+                <portNo>123</portNo>
+                <synchronizeInterval>30</synchronizeInterval>
+            </NTPServer>'''
+        response = self.session.put(f"{self.base_address}System/time/NtpServers/1", data=xml_data, auth=self.basic_auth)
+        json_response = Hikvision().to_json(response)
+        return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
+
+    def set_time_config(self, timezone=None):
+        if timezone is None:
+            timezone = "5"
+
+        xml_data = f'''
+            <Time>
+                <timeMode>NTP</timeMode>
+                <timeZone>CST-{timezone}:00:00</timeZone>
+            </Time>'''
+        response = self.session.put(f"{self.base_address}System/time", data=xml_data, auth=self.basic_auth)
+        json_response = Hikvision().to_json(response)
+        return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
+
+
 if __name__ == '__main__':
     sett = SetRequests()
     get = GetRequests()
+    print(get.get_time_config())
+    print(get.get_ntp_config())
+    print(get.get_stream_config())
+    print(get.get_wifi_list())
+    print(get.get_email_config())
+    print(get.get_osd_datetime_config())
+    print(get.get_osd_channel_name_config())
+    print(get.get_detection_config())
+    print(get.get_event_notification_config())
+
+    print(sett.set_email_config())
+    print(sett.set_ntp_config())
+    print(sett.set_eth_config())
+    print(sett.set_stream_config())
+    print(sett.set_time_config())
+
