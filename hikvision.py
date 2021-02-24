@@ -227,6 +227,78 @@ class SetRequests(Hikvision):
         json_response = Hikvision().to_json(response)
         return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
 
+    def set_osd_channel_config(self):
+        xml_data = '''
+        <channelNameOverlay>
+            <enabled>false</enabled>
+            <positionX>512</positionX>
+            <positionY>64</positionY>
+        </channelNameOverlay>
+        '''
+
+        response = self.session.put(f"{self.base_address}System/Video/inputs/channels/1/overlays/channelNameOverlay", data=xml_data, auth=get.basic_auth)
+        json_response = Hikvision().to_json(response)
+        return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
+
+    def set_osd_datetime_config(self):
+        xml_data = '''
+        <DateTimeOverlay>
+            <enabled>true</enabled>
+            <positionX>0</positionX>
+            <positionY>544</positionY>
+            <dateStyle>DD-MM-YYYY</dateStyle>
+            <timeStyle>24hour</timeStyle>
+            <displayWeek>false</displayWeek>
+        </DateTimeOverlay> 
+        '''
+        response = self.session.put(f"{self.base_address}System/Video/inputs/channels/1/overlays/dateTimeOverlay",
+                                    data=xml_data, auth=get.basic_auth)
+        json_response = Hikvision().to_json(response)
+        return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
+
+    def set_alarm_notifications_config(self):
+        xml_data = '''
+        <EventTriggerNotificationList>
+            <EventTriggerNotification>
+                <id>email</id>
+                <notificationMethod>email</notificationMethod>
+                <notificationRecurrence>recurring</notificationRecurrence>
+            </EventTriggerNotification>
+        </EventTriggerNotificationList>
+        '''
+
+        response = self.session.put(f"{self.base_address}Event/triggers/VMD-1/notifications",
+                                    data=xml_data, auth=get.basic_auth)
+        json_response = Hikvision().to_json(response)
+        return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
+
+    def set_detection_config(self):
+        xml_data = '''
+        <MotionDetection>
+            <enabled>true</enabled>
+            <enableHighlight>false</enableHighlight>
+            <samplingInterval>2</samplingInterval>
+            <startTriggerTime>500</startTriggerTime>
+            <endTriggerTime>500</endTriggerTime>
+            <regionType>grid</regionType>
+            <Grid>
+                <rowGranularity>18</rowGranularity>
+                <columnGranularity>22</columnGranularity>
+            </Grid>
+            <MotionDetectionLayout>
+                <sensitivityLevel>60</sensitivityLevel>
+                <layout>
+                    <gridMap>fffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffc</gridMap>
+                </layout>
+            </MotionDetectionLayout>
+        </MotionDetection>
+        '''
+
+        response = self.session.put(f"{self.base_address}System/Video/inputs/channels/1/motionDetection",
+                                    data=xml_data, auth=get.basic_auth)
+        json_response = Hikvision().to_json(response)
+        return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
+
 
 if __name__ == '__main__':
     sett = SetRequests()
@@ -246,4 +318,9 @@ if __name__ == '__main__':
     print(sett.set_eth_config())
     print(sett.set_stream_config())
     print(sett.set_time_config())
+    print(sett.set_osd_channel_config())
+    print(sett.set_osd_datetime_config())
+    print(sett.set_alarm_notifications_config())
+    print(sett.set_detection_config())
+
 
