@@ -1,3 +1,4 @@
 # Project exclude paths
 /venv/
-venv/DevDirectory/passwords.json
+passwords.json
+dbconf.json
