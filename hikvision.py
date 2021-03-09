@@ -3,12 +3,16 @@ import logging
 import os
 import sys
 
-import requests
-from flask import Flask, jsonify
+from flask import Flask
+from flask import request
 from requests import session
 
 from requests.auth import HTTPBasicAuth, HTTPDigestAuth
+import requests.exceptions as ex
 import xmltodict
+
+import get_requests
+import set_requests
 
 app = Flask(__name__)
 
@@ -47,6 +51,7 @@ class Client:
     def __init__(self, ip_address, user, password):
         self.ip_address = ip_address
         self.user = user
+        self.auth_type = "basic/digest"
         self.put = Put(self.ip_address)
         self.get = Get(self.ip_address)
         self.basic = HTTPBasicAuth(self.user, password)
@@ -56,20 +61,44 @@ class Client:
         self.basic = HTTPBasicAuth(self.user, password)
         self.digest = HTTPDigestAuth(self.user, password)
 
+    def __setitem__(self, value):
+        self.auth_type = value
+
+    def check_auth(self):
+        try:
+            r = self.get("Security/userCheck", auth=self.basic)
+            if r.headers.__contains__("WWW-Authenticate"):
+                self.__setitem__("digest")
+            else:
+                self.__setitem__("basic")
+        except ex.ConnectTimeout:
+            raise ex.ConnectTimeout("Нет соединения с камерой")
+        except ex.ConnectionError:
+            raise ex.ConnectionError("Нет соединения с камерой")
+
+    # Метод подстановки авторизации в запросы
+    def current_auth(self):
+        if self.auth_type == "basic":
+            return self.basic
+        else:
+            return self.digest
+
+    # Метод проверки текущего пароля на камеру
     def user_check(self):
         # импортируем список паролей на камеру
         with open(os.path.abspath('passwords.json'), "r") as passwords:
             password_list = json.load(passwords)
 
+        self.check_auth()
         try:
             # проверяем текущий пароль на камере и конвертируем xml ответ камеры в json
-            r = self.get("Security/userCheck", auth=self.basic)
+            r = self.get("Security/userCheck", auth=self.current_auth())
             r_json = to_json(r)
 
             # если пароль из конструктора подошёл - возвращем 200
             if r.status_code == 200:
                 log.debug("Auth: Success")
-                return 200
+                return "200"
 
             elif r.status_code == 401:
                 # если камера заблокирована из-за неуспешных попыток авторизации - не начинать перебор, вернуть ошибку
@@ -77,25 +106,20 @@ class Client:
                     log.debug(f"Camera is locked, unlock time {r_json['userCheck']['unlockTime']} sec.")
                     return f"Auth: Camera is locked, unlock time {r_json['userCheck']['unlockTime']} sec."
 
-                # обработка, когда запрос был послан с basic авторизацией, а камера принимает digest
-                elif r_json['userCheck']['lockStatus'] == "unlock" and r_json['userCheck']['retryLoginTime'] == "0":
-                    log.debug("Auth: Auth type used in requests are different auth type on camera")
-                    return "Auth type used in requests are different auth type on camera"
-
                 log.debug("Auth: Unauthorized")
                 # взять пароль из списка паролей
                 for password in password_list['values']:
                     # поменять пароль в конструкторе(для выполнения запроса с новым паролем)
                     self.__call__(password)
-                    # self.current_password = password
 
                     # проверяем новый пароль и конвертим ответ в json
-                    r = self.get("Security/userCheck", auth=self.basic)
+                    r = self.get("Security/userCheck", auth=self.current_auth())
                     r_json = to_json(r)
 
                     if r.status_code == 200:
                         log.debug("Auth: Success")
                         return "200"
+
                     elif r.status_code == 401:
                         # если камера заблокировалась из-за неуспешных попыток авторизации - прервать цикл,
                         # вернуть ошибку
@@ -103,6 +127,7 @@ class Client:
                             log.debug(f"Camera is locked, unlock time {r_json['userCheck']['unlockTime']} sec.")
                             return f"Camera is locked, unlock time {r_json['userCheck']['unlockTime']} sec."
                         log.debug("Auth: Unauthorized")
+
             # если на запрос вернулся статус 404 - то такого метода нет на устройстве
             # значит либо камера старая и не поддерживает такой метод, либо это не камера вовсе
             elif r.status_code == 404:
@@ -113,27 +138,40 @@ class Client:
         except (ConnectionError, TimeoutError) as e:
             return str(e)
 
-    def change_password(self):
+    # Метод смены пароля на камере
+    def change_password(self, password):
+        if password is None:
+            password = "tvmix333"
         try:
-            xml_data = '''
+            xml_data = f'''
             <User>
                 <id>1</id>
-                <userName>admin</userName>
-                <password>tvmix333</password>
+                <userName>{self.user}</userName>
+                <password>{password}</password>
             </User>
             '''
 
-            r = self.put("Security/users/1", data=xml_data, auth=self.basic)
+            r = self.put("Security/users/1", data=xml_data, auth=self.current_auth())
             return r.status_code
         except (ConnectionError, TimeoutError) as e:
             log.exception(e)
             return e
 
     @staticmethod
-    @app.route('/auth/<string:ip>')
-    def auth(ip):
-        a = Client(ip, "admin", "admin")
-        return a.user_check()
+    @app.route('/auth', methods=["POST"])
+    def auth():
+        data = request.get_json()
+        log.debug(data)
+        ip = data['data']['rtsp_ip']
+        user = data['data']['user']
+        password = data['data']['password']
+
+        a = Client(ip, user, password)
+        rget = get_requests.GetRequests(ip)
+        rset = set_requests.SetRequests(ip)
+        auth_status = a.user_check()
+        if auth_status == "200":
+            a.change_password()
 
 
 # def get_cam_config(self):
@@ -180,7 +218,6 @@ class Client:
 #     except Exception as e:
 #         log.exception(e)
 #         return str(e)
-
 
 if __name__ == '__main__':
     app.run(debug=True)
