@@ -1,4 +1,4 @@
 # Project exclude paths
 /venv/
 passwords.json
-dbconf.json
+tests.py

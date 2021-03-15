@@ -4,7 +4,6 @@ import os
 import sys
 from textwrap import wrap
 
-import jsonschema
 from jsonschema import validate
 from jsonschema import exceptions
 
@@ -633,9 +632,8 @@ class Client:
                     "rtsp_ip":      {"type": "string"},
                     "user":         {"type": "string"},
                     "password":     {"type": "string"},
-                    "mic":          {"type": "boolean"}
                 },
-                "required": ["rtsp_ip", "user", "password", "mic"]
+                "required": ["rtsp_ip", "user", "password"]
             }
             validate(data, schema)
         except exceptions.ValidationError as e:
