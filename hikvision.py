@@ -4,8 +4,7 @@ import os
 import sys
 from textwrap import wrap
 
-from jsonschema import validate
-from jsonschema import exceptions
+from jsonschema import validate, exceptions
 
 from flask import Flask, jsonify
 from flask import request
@@ -24,6 +23,15 @@ console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setLevel(logging.DEBUG)
 console_handler.setFormatter(logging.Formatter('[%(asctime)s %(filename)s:%(lineno)d] %(levelname)-8s %(message)s'))
 log.addHandler(console_handler)
+
+
+class StatusCode:
+    OK = "200"
+    Unauthorized = "401"
+    Locked = "403"
+    MethodNotFound = "404"
+    NotPing = "801"
+    ConnectionError = "802"
 
 
 class Get:
@@ -94,15 +102,15 @@ class Client:
             r_json = to_json(r)
 
             # если пароль из конструктора подошёл - возвращем 200
-            if r.status_code == 200 and r.text.__contains__("200"):
+            if r.status_code == 200 and "200" in r.text:
                 log.debug("Auth: Success")
-                return {"Auth": "200"}
+                return {"Auth": StatusCode.OK}
 
-            elif r.status_code == 401 or r.text.__contains__("401"):
+            elif r.status_code == 401 or "401" in r.text:
                 # если камера заблокирована из-за неуспешных попыток авторизации - не начинать перебор, вернуть ошибку
-                if r.text.__contains__("unlockTime"):
+                if "unlockTime" in r.text:
                     log.debug(f"Camera is locked, unlock time {r_json['userCheck']['unlockTime']} sec.")
-                    return {"Auth": "401"}
+                    return {"Auth": StatusCode.Unauthorized}
 
                 log.debug("Auth: Unauthorized")
 
@@ -119,34 +127,36 @@ class Client:
                     self.__call__(password)
 
                     # проверяем новый пароль и конвертим ответ в json
-                    r = self.get("Security/userCheck", auth=self.current_auth_type())
+                    r = self.get("Security/userCheck", auth=self.auth_type)
                     r_json = to_json(r)
 
                     # если пароль из конструктора подошёл - возвращем 200
-                    if r.status_code == 200 and r.text.__contains__("200"):
+                    if r.status_code == 200 and "200" in r.text:
                         log.debug("Auth: Success")
-                        return {"Auth": "200"}
+                        return {"Auth": StatusCode.OK}
 
-                    elif r.status_code == 401 or r.text.__contains__("401"):
+                    elif r.status_code == 401 or "401" in r.text:
                         # если камера заблокировалась из-за неуспешных попыток авторизации - прервать цикл,
                         # вернуть ошибку
-                        if r.text.__contains__("unlockTime"):
+                        if "unlockTime" in r.text:
                             log.debug(f"Camera is locked, unlock time {r_json['userCheck']['unlockTime']} sec.")
-                            return {"Auth": "401"}
+                            return {"Auth": StatusCode.Unauthorized}
                         log.debug("Auth: Unauthorized")
 
             elif r.status_code == 403:
                 log.debug("Auth: Forbidden(Camera is locked)")
-                return {"Auth": "403"}
+                return {"Auth": StatusCode.Locked}
 
             # если на запрос вернулся статус 404 - то такого метода нет на устройстве
             # значит либо камера старая и не поддерживает такой метод, либо это не камера вовсе
             elif r.status_code == 404:
                 log.debug("Auth: Device is not supported")
-                return {"Auth": "404"}
+                return {"Auth": StatusCode.MethodNotFound}
             else:
                 log.debug(f"Auth: Default error. Response status code {r.status_code}")
+                return {"Auth": r.status_code}
         except (ex.ConnectTimeout, ex.ConnectionError) as e:
+            log.debug(e)
             raise e("Нет соединения с камерой")
 
     # Метод смены пароля
@@ -160,7 +170,7 @@ class Client:
             </User>
             '''
 
-            r = self.put("Security/users/1", data=xml_data, auth=self.current_auth_type())
+            r = self.put("Security/users/1", data=xml_data, auth=self.auth_type)
             return {"Auth": r.status_code}
         except (ex.ConnectTimeout, ex.ConnectionError) as e:
             raise e("Нет соединения с камерой")
@@ -168,7 +178,7 @@ class Client:
     # Получить информацию о MAC адресе и серийном номере
     def device_info(self):
         try:
-            response = self.get("System/deviceInfo", auth=self.current_auth_type())
+            response = self.get("System/deviceInfo", auth=self.auth_type)
             return to_json(response)
         except (ex.ConnectTimeout, ex.ConnectionError) as e:
             raise e("Нет соединения с камерой")
@@ -177,7 +187,7 @@ class Client:
     # ip, маска, шлюз и т.п
     def get_eth_config(self):
         try:
-            response = self.get("System/Network/interfaces/1/ipAddress", auth=self.current_auth_type())
+            response = self.get("System/Network/interfaces/1/ipAddress", auth=self.auth_type)
             return to_json(response)
         except (ex.ConnectTimeout, ex.ConnectionError) as e:
             raise e("Нет соединения с камерой")
@@ -185,7 +195,7 @@ class Client:
     # Получить настройки видео-аудио конфигурации
     def get_stream_config(self):
         try:
-            response = self.get("Streaming/channels/101", auth=self.current_auth_type())
+            response = self.get("Streaming/channels/101", auth=self.auth_type)
             return to_json(response)
         except (ex.ConnectTimeout, ex.ConnectionError) as e:
             raise e("Нет соединения с камерой")
@@ -193,7 +203,7 @@ class Client:
     # Получить настройки времени
     def get_time_config(self):
         try:
-            response = self.get("System/time", auth=self.current_auth_type())
+            response = self.get("System/time", auth=self.auth_type)
             return to_json(response)
         except (ex.ConnectTimeout, ex.ConnectionError) as e:
             raise e("Нет соединения с камерой")
@@ -201,7 +211,7 @@ class Client:
     # Получить NTP конфиг
     def get_ntp_config(self):
         try:
-            response = self.get("System/time/NtpServers/1", auth=self.current_auth_type())
+            response = self.get("System/time/NtpServers/1", auth=self.auth_type)
             return to_json(response)
         except (ex.ConnectTimeout, ex.ConnectionError) as e:
             raise e("Нет соединения с камерой")
@@ -209,7 +219,7 @@ class Client:
     # Получить SMTP конфиг
     def get_email_config(self):
         try:
-            response = self.get("System/Network/mailing/1", auth=self.current_auth_type())
+            response = self.get("System/Network/mailing/1", auth=self.auth_type)
             return to_json(response)
         except (ex.ConnectTimeout, ex.ConnectionError) as e:
             raise e("Нет соединения с камерой")
@@ -217,7 +227,7 @@ class Client:
     # Получить конфиг детекции
     def get_detection_config(self):
         try:
-            response = self.get("System/Video/inputs/channels/1/motionDetection", auth=self.current_auth_type())
+            response = self.get("System/Video/inputs/channels/1/motionDetection", auth=self.auth_type)
             return to_json(response)
         except (ex.ConnectTimeout, ex.ConnectionError) as e:
             raise e("Нет соединения с камерой")
@@ -225,7 +235,7 @@ class Client:
     # Получить список wi-fi сетей которые видит устройство
     def get_wifi_list(self):
         try:
-            response = self.get("System/Network/interfaces/2/wireless/accessPointList", auth=self.current_auth_type())
+            response = self.get("System/Network/interfaces/2/wireless/accessPointList", auth=self.auth_type)
             return to_json(response)
         except (ex.ConnectTimeout, ex.ConnectionError) as e:
             raise e("Нет соединения с камерой")
@@ -233,7 +243,8 @@ class Client:
     # Получить конфиг OSD времени
     def get_osd_datetime_config(self):
         try:
-            response = self.get("System/Video/inputs/channels/1/overlays/dateTimeOverlay", auth=self.current_auth_type())
+            response = self.get("System/Video/inputs/channels/1/overlays/dateTimeOverlay",
+                                auth=self.auth_type)
             return to_json(response)
         except (ex.ConnectTimeout, ex.ConnectionError) as e:
             raise e("Нет соединения с камерой")
@@ -242,7 +253,7 @@ class Client:
     def get_osd_channel_name_config(self):
         try:
             response = self.get("System/Video/inputs/channels/1/overlays/channelNameOverlay",
-                                auth=self.current_auth_type())
+                                auth=self.auth_type)
             return to_json(response)
         except (ex.ConnectTimeout, ex.ConnectionError) as e:
             raise e("Нет соединения с камерой")
@@ -250,7 +261,7 @@ class Client:
     # Получить конфиг отправки детекции
     def get_event_notification_config(self):
         try:
-            response = self.get("Event/triggers/VMD-1/notifications", auth=self.current_auth_type())
+            response = self.get("Event/triggers/VMD-1/notifications", auth=self.auth_type)
             return to_json(response)
         except (ex.ConnectTimeout, ex.ConnectionError) as e:
             raise e("Нет соединения с камерой")
@@ -299,7 +310,7 @@ class Client:
                 </IPAddress>'''
 
         try:
-            response = self.put("System/Network/interfaces/1/ipAddress", data=xml_data, auth=self.current_auth_type())
+            response = self.put("System/Network/interfaces/1/ipAddress", data=xml_data, auth=self.auth_type)
             json_response = to_json(response)
             return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
         except (ex.ConnectTimeout, ex.ConnectionError) as e:
@@ -326,7 +337,7 @@ class Client:
             </StreamingChannel>'''
 
         try:
-            response = self.put("Streaming/channels/101", data=xml_data, auth=self.current_auth_type())
+            response = self.put("Streaming/channels/101", data=xml_data, auth=self.auth_type)
             json_response = to_json(response)
             return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
         except (ex.ConnectTimeout, ex.ConnectionError) as e:
@@ -371,7 +382,7 @@ class Client:
                     </attachment>
                 </mailing>'''
         try:
-            response = self.put("System/Network/mailing/1", data=xml_data, auth=self.current_auth_type())
+            response = self.put("System/Network/mailing/1", data=xml_data, auth=self.auth_type)
             json_response = to_json(response)
             return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
         except (ex.ConnectTimeout, ex.ConnectionError) as e:
@@ -388,7 +399,7 @@ class Client:
                 <synchronizeInterval>30</synchronizeInterval>
             </NTPServer>'''
         try:
-            response = self.put("System/time/NtpServers/1", data=xml_data, auth=self.current_auth_type())
+            response = self.put("System/time/NtpServers/1", data=xml_data, auth=self.auth_type)
             json_response = to_json(response)
             return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
         except (ex.ConnectTimeout, ex.ConnectionError) as e:
@@ -404,7 +415,7 @@ class Client:
         '''
 
         try:
-            response = self.put("System/time", data=xml_data, auth=self.current_auth_type())
+            response = self.put("System/time", data=xml_data, auth=self.auth_type)
             json_response = to_json(response)
             return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
         except (ex.ConnectTimeout, ex.ConnectionError) as e:
@@ -422,7 +433,7 @@ class Client:
 
         try:
             response = self.put("System/Video/inputs/channels/1/overlays/channelNameOverlay", data=xml_data,
-                                auth=self.current_auth_type())
+                                auth=self.auth_type)
             json_response = to_json(response)
             return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
         except (ex.ConnectTimeout, ex.ConnectionError) as e:
@@ -442,7 +453,7 @@ class Client:
         '''
         try:
             response = self.put("System/Video/inputs/channels/1/overlays/dateTimeOverlay",
-                                data=xml_data, auth=self.current_auth_type())
+                                data=xml_data, auth=self.auth_type)
             json_response = to_json(response)
             return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
         except (ex.ConnectTimeout, ex.ConnectionError) as e:
@@ -463,7 +474,7 @@ class Client:
 
         try:
             response = self.put("Event/triggers/VMD-1/notifications",
-                                data=xml_data, auth=self.current_auth_type())
+                                data=xml_data, auth=self.auth_type)
             json_response = to_json(response)
             return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
         except (ex.ConnectTimeout, ex.ConnectionError) as e:
@@ -495,7 +506,7 @@ class Client:
 
         try:
             response = self.put("System/Video/inputs/channels/1/motionDetection",
-                                data=xml_data, auth=self.current_auth_type())
+                                data=xml_data, auth=self.auth_type)
             json_response = to_json(response)
             return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
         except (ex.ConnectTimeout, ex.ConnectionError) as e:
@@ -503,8 +514,8 @@ class Client:
 
     # Цель метода - сменить маску детекции на камере, когда клиент её поменял через ЛК
     # На вход должна поступить маска детекции в виде строки из 396 символов.
-    # Знчение символа: либо 1 либо 0. Если 1 - значит ячейка в ЛК активирована, и её нужно отрисовать на камере
-    def set_detection_mask(self, mask_from_lk=None):
+    # Значение символа: либо 1 либо 0. Если 1 - значит ячейка в ЛК активирована, и её нужно отрисовать на камере
+    def change_detection_mask(self, mask_from_lk=None):
         if mask_from_lk is None:
             mask_from_lk = \
                 "1111111111111111111111" \
@@ -540,7 +551,7 @@ class Client:
                 array_4chars = wrap(sub_array, 4)  # массив в виде ['1111', '1111', '1111', '1111', '1111', '11']
                 for sub_array1 in array_4chars:  # '1111'
                     index = 0  # Для обращения по индексу
-                    sum = 0  # Сумма hex_values, объявлена чтобы её можно было использовать в коде
+                    sum = 0  # Сумма hex_values
                     for value in sub_array1:  # перебор значений в sub_array чтобы выяснить сумму
                         if int(value) == 1:
                             sum += hex_values[index]
@@ -548,7 +559,6 @@ class Client:
                             sum += 0
                         index += 1
                     grid_for_cam.append(hex(sum).split('x')[-1])  # Добавление hex значения в конец массива
-                    sum = 0  # сбрасываем результат предыдущих вычислений
 
             final_grid = str.join("", grid_for_cam)
             xml_data = f'''
@@ -562,10 +572,52 @@ class Client:
 
             response = \
                 self.put("System/Video/inputs/channels/1/motionDetection/layout/gridLayout", data=xml_data,
-                         auth=self.current_auth_type())
+                         auth=self.auth_type)
             json_response = to_json(response)
             return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
         except (ex.ConnectTimeout, ex.ConnectionError) as e:
+            log.debug(e.message)
+            raise e("Нет соединения с камерой")
+        except ex.RequestException as e:
+            log.debug(e)
+
+    # Метод смены маски детекции
+    @staticmethod
+    @app.route('/setMask', methods=["POST"])
+    def set_detection_mask():
+        data = request.get_json()
+        log.debug(f"Incoming data: {data}")
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "rtsp_ip": {"type": "string"},
+                "user": {"type": "string"},
+                "password": {"type": "string"},
+                "mask": {"type": "string", "minLength": 396, "maxLength": 396}
+            },
+            "required": ["rtsp_ip", "user", "password", "mask"]
+        }
+        try:
+            validate(data, schema)
+        except exceptions.ValidationError as e:
+            log.debug(e.message)
+            return e.message
+
+        ip = data['rtsp_ip']
+        user = data['user']
+        password = data['password']
+        mask = data['mask']
+
+        a = Client(ip, user, password)
+        try:
+            auth_status = a.user_check()
+            if auth_status.get("Auth") == "200":
+                return jsonify(a.change_detection_mask(mask_from_lk=mask))
+            else:
+                return auth_status
+        except (ex.ConnectTimeout, ex.ConnectionError) as e:
+            log.exception(e)
             raise e("Нет соединения с камерой")
 
     @staticmethod
@@ -574,20 +626,21 @@ class Client:
         data = request.get_json()
         log.debug(f"Incoming data: {data}")
 
+        schema = {
+            "type": "object",
+            "properties": {
+                "rtsp_ip": {"type": "string"},
+                "user": {"type": "string"},
+                "password": {"type": "string"},
+                "mic": {"type": "boolean"}
+            },
+            "required": ["rtsp_ip", "user", "password", "mic"]
+        }
         # Проверяем прошедший json
         try:
-            schema = {
-                "type": "object",
-                "properties": {
-                    "rtsp_ip":      {"type": "string"},
-                    "user":         {"type": "string"},
-                    "password":     {"type": "string"},
-                    "mic":          {"type": "boolean"}
-                },
-                "required": ["rtsp_ip", "user", "password", "mic"]
-            }
             validate(data, schema)
         except exceptions.ValidationError as e:
+            log.debug(e.message)
             return e.message
 
         ip = data['rtsp_ip']
@@ -612,7 +665,7 @@ class Client:
                     a.set_detection_config()
                 )
                 log.debug(json.dumps(big_cam_json, indent=4))
-                return jsonify(big_cam_json)
+                return big_cam_json
             else:
                 return auth_status
         except (ex.ConnectTimeout, ex.ConnectionError) as e:
@@ -625,16 +678,16 @@ class Client:
         data = request.get_json()
         log.debug(f"Incoming data: {data}")
 
+        schema = {
+            "type": "object",
+            "properties": {
+                "rtsp_ip": {"type": "string"},
+                "user": {"type": "string"},
+                "password": {"type": "string"},
+            },
+            "required": ["rtsp_ip", "user", "password"]
+        }
         try:
-            schema = {
-                "type": "object",
-                "properties": {
-                    "rtsp_ip":      {"type": "string"},
-                    "user":         {"type": "string"},
-                    "password":     {"type": "string"},
-                },
-                "required": ["rtsp_ip", "user", "password"]
-            }
             validate(data, schema)
         except exceptions.ValidationError as e:
             return e.message
@@ -668,4 +721,4 @@ class Client:
 
 
 if __name__ == '__main__':
-    app.run(debug=False)
+    app.run(debug=True)
