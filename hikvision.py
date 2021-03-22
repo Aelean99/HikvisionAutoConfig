@@ -3,6 +3,8 @@ import logging
 import os
 import sys
 from textwrap import wrap
+from pydantic import BaseModel
+from typing import List
 
 from jsonschema import validate, exceptions
 
@@ -26,12 +28,13 @@ log.addHandler(console_handler)
 
 
 class StatusCode:
-    OK = "200"
-    Unauthorized = "401"
-    Locked = "403"
-    MethodNotFound = "404"
-    NotPing = "801"
-    ConnectionError = "802"
+    OK = 200
+    Unauthorized = 401
+    Locked = 403
+    MethodNotFound = 404
+    NotPing = 801
+    ConnectionError = 802
+    UnhandledExceptionError = 803
 
 
 class Get:
@@ -50,6 +53,14 @@ class Put:
         return session().put(f"http://{self.ip}/ISAPI/{uri}", data=data, auth=auth)
 
 
+class Post:
+    def __init__(self, ip):
+        self.ip = ip
+
+    def __call__(self, uri, data, auth):
+        return session().post(f"http://{self.ip}/ISAPI/{uri}", data=data, auth=auth)
+
+
 def to_json(response):
     xml_dict = xmltodict.parse(response.content)
     json_response = json.loads(json.dumps(xml_dict))
@@ -63,6 +74,7 @@ class Client:
         self.auth_type = "basic/digest"
         self.put = Put(self.ip_address)
         self.get = Get(self.ip_address)
+        self.post = Post(self.ip_address)
         self.basic = HTTPBasicAuth(self.user, password)
         self.digest = HTTPDigestAuth(self.user, password)
 
@@ -107,6 +119,8 @@ class Client:
                 return {"Auth": StatusCode.OK}
 
             elif r.status_code == 401 or "401" in r.text:
+                r_json = to_json(r)
+
                 # если камера заблокирована из-за неуспешных попыток авторизации - не начинать перебор, вернуть ошибку
                 if "unlockTime" in r.text:
                     log.debug(f"Camera is locked, unlock time {r_json['userCheck']['unlockTime']} sec.")
@@ -155,90 +169,161 @@ class Client:
             else:
                 log.debug(f"Auth: Default error. Response status code {r.status_code}")
                 return {"Auth": r.status_code}
-        except (ex.ConnectTimeout, ex.ConnectionError) as e:
-            log.debug(e)
-            raise e("Нет соединения с камерой")
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
 
     # Метод смены пароля
-    def change_password(self, password="tvmix333"):
+    # user_id = 1 //админская учётка.
+    # user_id = 2 и тд остальные создаваеые пользователи
+    def change_password(self, data):
         try:
             xml_data = f'''
             <User>
-                <id>1</id>
-                <userName>{self.user}</userName>
-                <password>{password}</password>
+                <id>{data.user_id}</id>
+                <userName>{data.admin_username}</userName>
+                <password>{data.admin_password}</password>
             </User>
             '''
 
-            r = self.put("Security/users/1", data=xml_data, auth=self.auth_type)
+            r = self.put(f"Security/users/{data.user_id}", data=xml_data, auth=self.auth_type)
             return {"Auth": r.status_code}
-        except (ex.ConnectTimeout, ex.ConnectionError) as e:
-            raise e("Нет соединения с камерой")
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
 
     # Получить информацию о MAC адресе и серийном номере
     def device_info(self):
         try:
             response = self.get("System/deviceInfo", auth=self.auth_type)
-            return to_json(response)
-        except (ex.ConnectTimeout, ex.ConnectionError) as e:
-            raise e("Нет соединения с камерой")
+            return StatusCode.OK, to_json(response)
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
 
     # Получить конфиг сети с камеры
     # ip, маска, шлюз и т.п
     def get_eth_config(self):
         try:
             response = self.get("System/Network/interfaces/1/ipAddress", auth=self.auth_type)
-            return to_json(response)
-        except (ex.ConnectTimeout, ex.ConnectionError) as e:
-            raise e("Нет соединения с камерой")
+            return StatusCode.OK, to_json(response)
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
 
     # Получить настройки видео-аудио конфигурации
     def get_stream_config(self):
         try:
             response = self.get("Streaming/channels/101", auth=self.auth_type)
             return to_json(response)
-        except (ex.ConnectTimeout, ex.ConnectionError) as e:
-            raise e("Нет соединения с камерой")
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
 
     # Получить настройки времени
     def get_time_config(self):
         try:
             response = self.get("System/time", auth=self.auth_type)
             return to_json(response)
-        except (ex.ConnectTimeout, ex.ConnectionError) as e:
-            raise e("Нет соединения с камерой")
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
 
     # Получить NTP конфиг
     def get_ntp_config(self):
         try:
             response = self.get("System/time/NtpServers/1", auth=self.auth_type)
             return to_json(response)
-        except (ex.ConnectTimeout, ex.ConnectionError) as e:
-            raise e("Нет соединения с камерой")
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
 
     # Получить SMTP конфиг
     def get_email_config(self):
         try:
             response = self.get("System/Network/mailing/1", auth=self.auth_type)
             return to_json(response)
-        except (ex.ConnectTimeout, ex.ConnectionError) as e:
-            raise e("Нет соединения с камерой")
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
 
     # Получить конфиг детекции
     def get_detection_config(self):
         try:
             response = self.get("System/Video/inputs/channels/1/motionDetection", auth=self.auth_type)
             return to_json(response)
-        except (ex.ConnectTimeout, ex.ConnectionError) as e:
-            raise e("Нет соединения с камерой")
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
 
     # Получить список wi-fi сетей которые видит устройство
     def get_wifi_list(self):
         try:
             response = self.get("System/Network/interfaces/2/wireless/accessPointList", auth=self.auth_type)
             return to_json(response)
-        except (ex.ConnectTimeout, ex.ConnectionError) as e:
-            raise e("Нет соединения с камерой")
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
 
     # Получить конфиг OSD времени
     def get_osd_datetime_config(self):
@@ -246,8 +331,15 @@ class Client:
             response = self.get("System/Video/inputs/channels/1/overlays/dateTimeOverlay",
                                 auth=self.auth_type)
             return to_json(response)
-        except (ex.ConnectTimeout, ex.ConnectionError) as e:
-            raise e("Нет соединения с камерой")
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
 
     # Получить конфиг OSD имени устройства
     def get_osd_channel_name_config(self):
@@ -255,84 +347,110 @@ class Client:
             response = self.get("System/Video/inputs/channels/1/overlays/channelNameOverlay",
                                 auth=self.auth_type)
             return to_json(response)
-        except (ex.ConnectTimeout, ex.ConnectionError) as e:
-            raise e("Нет соединения с камерой")
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
 
     # Получить конфиг отправки детекции
     def get_event_notification_config(self):
         try:
             response = self.get("Event/triggers/VMD-1/notifications", auth=self.auth_type)
             return to_json(response)
-        except (ex.ConnectTimeout, ex.ConnectionError) as e:
-            raise e("Нет соединения с камерой")
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
 
     # Сменить DNS
-    def set_eth_config(self, dns=None):
-        if dns is None:
-            dns = ["217.24.176.230", "217.24.177.2"]
-
+    def set_eth_config(self, data):
         current_eth_data = self.get_eth_config()
-        if current_eth_data == 701:
-            return 701
-        addressing_type = current_eth_data['IPAddress']['addressingType']
 
-        if addressing_type != "static":
-            return f"Addressing type is {addressing_type}. Can`t set DNS"
-        ip_address = current_eth_data['IPAddress']['ipAddress']
-        subnet_mask = current_eth_data['IPAddress']['subnetMask']
-        gateway = current_eth_data['IPAddress']['DefaultGateway']['ipAddress']
+        if current_eth_data[0] == StatusCode.OK:
+            ethernet_config = current_eth_data[1]
+            addressing_type = ethernet_config['IPAddress']['addressingType']
 
-        xml_data = f'''<IPAddress>
-                    <ipVersion>v4</ipVersion>
-                    <addressingType>static</addressingType>
-                    <ipAddress>{ip_address}</ipAddress>
-                    <subnetMask>{subnet_mask}</subnetMask>
-                    <DefaultGateway>
-                        <ipAddress>{gateway}</ipAddress>
-                    </DefaultGateway>
-                    <PrimaryDNS>
-                        <ipAddress>{dns[0]}</ipAddress>
-                    </PrimaryDNS>
-                    <SecondaryDNS>
-                        <ipAddress>{dns[1]}</ipAddress>
-                    </SecondaryDNS>
-                    <Ipv6Mode>
-                        <ipV6AddressingType>ra</ipV6AddressingType>
-                        <ipv6AddressList>
-                            <v6Address>
-                                <id>1</id>
-                                <type>manual</type>
-                                <address>::</address>
-                                <bitMask>0</bitMask>
-                            </v6Address>
-                        </ipv6AddressList>
-                    </Ipv6Mode>
-                </IPAddress>'''
+            if addressing_type != "static":
+                return f"Addressing type is {addressing_type}. Can`t set DNS"
+            ip_address = ethernet_config['IPAddress']['ipAddress']
+            subnet_mask = ethernet_config['IPAddress']['subnetMask']
+            gateway = ethernet_config['IPAddress']['DefaultGateway']['ipAddress']
 
-        try:
-            response = self.put("System/Network/interfaces/1/ipAddress", data=xml_data, auth=self.auth_type)
-            json_response = to_json(response)
-            return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
-        except (ex.ConnectTimeout, ex.ConnectionError) as e:
-            raise e("Нет соединения с камерой")
+            xml_data = f'''<IPAddress>
+                                <ipVersion>v4</ipVersion>
+                                <addressingType>static</addressingType>
+                                <ipAddress>{ip_address}</ipAddress>
+                                <subnetMask>{subnet_mask}</subnetMask>
+                                <DefaultGateway>
+                                    <ipAddress>{gateway}</ipAddress>
+                                </DefaultGateway>
+                                <PrimaryDNS>
+                                    <ipAddress>{data.dns[0]}</ipAddress>
+                                </PrimaryDNS>
+                                <SecondaryDNS>
+                                    <ipAddress>{data.dns[1]}</ipAddress>
+                                </SecondaryDNS>
+                                <Ipv6Mode>
+                                    <ipV6AddressingType>ra</ipV6AddressingType>
+                                    <ipv6AddressList>
+                                        <v6Address>
+                                            <id>1</id>
+                                            <type>manual</type>
+                                            <address>::</address>
+                                            <bitMask>0</bitMask>
+                                        </v6Address>
+                                    </ipv6AddressList>
+                                </Ipv6Mode>
+                            </IPAddress>'''
+
+            try:
+                response = self.put("System/Network/interfaces/1/ipAddress", data=xml_data, auth=self.auth_type)
+                json_response = to_json(response)
+                return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
+            except ex.ConnectTimeout:
+                log.debug("Камера не пингуется")
+                return StatusCode.NotPing
+            except ex.ConnectionError:
+                log.debug("Ошибка соединения с камерой")
+                return StatusCode.ConnectionError
+            except ex.RequestException as e:
+                log.debug("Ошибка запроса", e.response)
+                return StatusCode.UnhandledExceptionError
+
+        elif current_eth_data[0] == StatusCode.NotPing:
+            return "Камера не пингуется"
+        elif current_eth_data[0] == StatusCode.ConnectionError:
+            return "Ошибка соединения с камерой"
+        elif current_eth_data[0] == StatusCode.UnhandledExceptionError:
+            return "Ошибка запроса"
 
     # Настроить Video-Audio конфигурацию
-    def set_stream_config(self, mic="false"):
+    def set_stream_config(self, data):
         xml_data = f'''
             <StreamingChannel>
                 <Video>
-                    <videoCodecType>H.264</videoCodecType>
-                    <videoResolutionWidth>1280</videoResolutionWidth>
-                    <videoResolutionHeight>720</videoResolutionHeight>
-                    <videoQualityControlType>VBR</videoQualityControlType>
-                    <fixedQuality>100</fixedQuality>
-                    <vbrUpperCap>1024</vbrUpperCap>
-                    <maxFrameRate>1200</maxFrameRate>
-                    <GovLength>20</GovLength>
+                    <videoCodecType>{data.videoCodecType}</videoCodecType>
+                    <videoResolutionWidth>{data.videoResolutionWidth}</videoResolutionWidth>
+                    <videoResolutionHeight>{data.videoResolutionHeight}</videoResolutionHeight>
+                    <videoQualityControlType>{data.videoQualityControlType}</videoQualityControlType>
+                    <fixedQuality>{data.fixedQuality}</fixedQuality>
+                    <vbrUpperCap>{data.vbrUpperCap}</vbrUpperCap>
+                    <maxFrameRate>{data.maxFrameRate}</maxFrameRate>
+                    <GovLength>{data.GovLength}</GovLength>
                 </Video>
                 <Audio>
-                    <enabled>{str(mic).lower()}</enabled>
-                    <audioCompressionType>MP2L2</audioCompressionType>
+                    <enabled>{str(data.mic).lower()}</enabled>
+                    <audioCompressionType>{data.audioCompressionType}</audioCompressionType>
                 </Audio>
             </StreamingChannel>'''
 
@@ -340,15 +458,22 @@ class Client:
             response = self.put("Streaming/channels/101", data=xml_data, auth=self.auth_type)
             json_response = to_json(response)
             return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
-        except (ex.ConnectTimeout, ex.ConnectionError) as e:
-            raise e("Нет соединения с камерой")
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
 
     # Настроить SMTP
-    def set_email_config(self):
+    def set_email_config(self, data):
         device_info = self.device_info()
         if device_info is None:
             return "device_info is empty"
-        serial_number = device_info['DeviceInfo']['serialNumber']
+        serial_number = device_info[1]['DeviceInfo']['serialNumber']
         cam_email = f"HK-{serial_number}@camera.ru"
         xml_data = f'''
                 <mailing>
@@ -359,9 +484,9 @@ class Client:
                         <smtp>
                             <enableAuthorization>false</enableAuthorization>
                             <enableSSL>false</enableSSL>
-                            <addressingFormatType>hostname</addressingFormatType>
-                            <hostName>alarm.profintel.ru</hostName>
-                            <portNo>15006</portNo>
+                            <addressingFormatType>{data.addressingFormatType}</addressingFormatType>
+                            <hostName>{data.hostName}</hostName>
+                            <portNo>{data.portNo}</portNo>
                             <accountName></accountName>
                             <enableTLS>false</enableTLS>
                             <startTLS>false</startTLS>
@@ -385,16 +510,24 @@ class Client:
             response = self.put("System/Network/mailing/1", data=xml_data, auth=self.auth_type)
             json_response = to_json(response)
             return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
-        except (ex.ConnectTimeout, ex.ConnectionError) as e:
-            raise e("Нет соединения с камерой")
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
 
     # Настроить NTP
-    def set_ntp_config(self):
-        xml_data = '''
+    def set_ntp_config(self, data):
+        xml_data = f'''
             <NTPServer>
                 <id>1</id>
-                <addressingFormatType>ipaddress</addressingFormatType>
-                <ipAddress>217.24.176.232</ipAddress>
+                <addressingFormatType>{data.ntp_format}</addressingFormatType>
+                <hostName>{data.hostName}</hostName>
+                <ipAddress>{data.ntp_ip}</ipAddress>
                 <portNo>123</portNo>
                 <synchronizeInterval>30</synchronizeInterval>
             </NTPServer>'''
@@ -402,15 +535,22 @@ class Client:
             response = self.put("System/time/NtpServers/1", data=xml_data, auth=self.auth_type)
             json_response = to_json(response)
             return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
-        except (ex.ConnectTimeout, ex.ConnectionError) as e:
-            raise e("Нет соединения с камерой")
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
 
     # Настроить время
-    def set_time_config(self, timezone="5"):
+    def set_time_config(self, data):
         xml_data = f'''
             <Time>
                 <timeMode>NTP</timeMode>
-                <timeZone>CST-{timezone}:00:00</timeZone>
+                <timeZone>CST-{data.timezone}:00:00</timeZone>
             </Time>
         '''
 
@@ -418,14 +558,21 @@ class Client:
             response = self.put("System/time", data=xml_data, auth=self.auth_type)
             json_response = to_json(response)
             return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
-        except (ex.ConnectTimeout, ex.ConnectionError) as e:
-            raise e("Нет соединения с камерой")
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
 
     # Отключить отображение имени устройства на видео-потоке
-    def set_osd_channel_config(self):
-        xml_data = '''
+    def set_osd_channel_config(self, data):
+        xml_data = f'''
         <channelNameOverlay>
-            <enabled>false</enabled>
+            <enabled>{str(data.is_enabled).lower()}</enabled>
             <positionX>512</positionX>
             <positionY>64</positionY>
         </channelNameOverlay>
@@ -436,8 +583,15 @@ class Client:
                                 auth=self.auth_type)
             json_response = to_json(response)
             return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
-        except (ex.ConnectTimeout, ex.ConnectionError) as e:
-            raise e("Нет соединения с камерой")
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
 
     # Включить отображение времени на видео-потоке
     def set_osd_datetime_config(self):
@@ -456,8 +610,15 @@ class Client:
                                 data=xml_data, auth=self.auth_type)
             json_response = to_json(response)
             return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
-        except (ex.ConnectTimeout, ex.ConnectionError) as e:
-            raise e("Нет соединения с камерой")
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
 
     # Настроить способ отправки обнаруженных алармов
     # В данном случае замеченная детекция будет отправлять на email
@@ -472,18 +633,30 @@ class Client:
         </EventTriggerNotificationList>
         '''
 
+        #   id <!—req, xs:string;id </id>
+        #   notificationMethod <!—req, xs:string, “email,IM,IO,syslog,HTTP,FTP,beep, ptz, record, monitorAlarm,
+        #   center, LightAudioAlarm,focus,trace,cloud”
+        #   notificationRecurrence <!—opt, xs:string, “beginning, beginningandend, recurring” 
+
         try:
             response = self.put("Event/triggers/VMD-1/notifications",
                                 data=xml_data, auth=self.auth_type)
             json_response = to_json(response)
             return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
-        except (ex.ConnectTimeout, ex.ConnectionError) as e:
-            raise e("Нет соединения с камерой")
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
 
     # Настройка конфигурации детекции движения
     # Включается функционал отлова движения, заполняется маска детекции
-    def set_detection_config(self):
-        xml_data = '''
+    def set_detection_config(self, data):
+        xml_data = f'''
         <MotionDetection>
             <enabled>true</enabled>
             <enableHighlight>false</enableHighlight>
@@ -496,9 +669,9 @@ class Client:
                 <columnGranularity>22</columnGranularity>
             </Grid>
             <MotionDetectionLayout>
-                <sensitivityLevel>60</sensitivityLevel>
+                <sensitivityLevel>{data.sensitivityLevel}</sensitivityLevel>
                 <layout>
-                    <gridMap>fffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffc</gridMap>
+                    <gridMap>{data.gridMap}</gridMap>
                 </layout>
             </MotionDetectionLayout>
         </MotionDetection>
@@ -509,8 +682,15 @@ class Client:
                                 data=xml_data, auth=self.auth_type)
             json_response = to_json(response)
             return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
-        except (ex.ConnectTimeout, ex.ConnectionError) as e:
-            raise e("Нет соединения с камерой")
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
 
     # Цель метода - сменить маску детекции на камере, когда клиент её поменял через ЛК
     # На вход должна поступить маска детекции в виде строки из 396 символов.
@@ -575,11 +755,21 @@ class Client:
                          auth=self.auth_type)
             json_response = to_json(response)
             return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
-        except (ex.ConnectTimeout, ex.ConnectionError) as e:
-            log.debug(e.message)
-            raise e("Нет соединения с камерой")
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
         except ex.RequestException as e:
-            log.debug(e)
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
+
+    @staticmethod
+    @app.route('/changePass', methods=["POST"])
+    def change_password():
+        data = request.get_json()
+        log.debug(f"Incoming data: {data}")
 
     # Метод смены маски детекции
     @staticmethod
@@ -587,6 +777,7 @@ class Client:
     def set_detection_mask():
         data = request.get_json()
         log.debug(f"Incoming data: {data}")
+        inc_data = IncomingData(**data)
 
         schema = {
             "type": "object",
@@ -609,46 +800,35 @@ class Client:
         password = data['password']
         mask = data['mask']
 
-        a = Client(ip, user, password)
+        a = Client(inc_data.rtsp_ip,
+                   inc_data.user_data.admin_username,
+                   inc_data.user_data.admin_password)
         try:
             auth_status = a.user_check()
-            if auth_status.get("Auth") == "200":
+            if auth_status.get("Auth") == StatusCode.OK:
                 return jsonify(a.change_detection_mask(mask_from_lk=mask))
             else:
                 return auth_status
-        except (ex.ConnectTimeout, ex.ConnectionError) as e:
-            log.exception(e)
-            raise e("Нет соединения с камерой")
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
 
     @staticmethod
     @app.route('/set', methods=["POST"])
     def set_config():
         data = request.get_json()
         log.debug(f"Incoming data: {data}")
+        inc_data = IncomingData(**data)
 
-        schema = {
-            "type": "object",
-            "properties": {
-                "rtsp_ip": {"type": "string"},
-                "user": {"type": "string"},
-                "password": {"type": "string"},
-                "mic": {"type": "boolean"}
-            },
-            "required": ["rtsp_ip", "user", "password", "mic"]
-        }
-        # Проверяем прошедший json
-        try:
-            validate(data, schema)
-        except exceptions.ValidationError as e:
-            log.debug(e.message)
-            return e.message
-
-        ip = data['rtsp_ip']
-        user = data['user']
-        password = data['password']
-        mic = data['mic']
-
-        a = Client(ip, user, password)
+        a = Client(inc_data.rtsp_ip,
+                   inc_data.user_data.admin_username,
+                   inc_data.user_data.admin_password)
         try:
             auth_status = a.user_check()
             if auth_status.get("Auth") == "200":
@@ -668,40 +848,31 @@ class Client:
                 return big_cam_json
             else:
                 return auth_status
-        except (ex.ConnectTimeout, ex.ConnectionError) as e:
-            log.exception(e)
-            raise e("Нет соединения с камерой")
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
 
     @staticmethod
     @app.route('/get', methods=["POST"])
     def get_config():
         data = request.get_json()
         log.debug(f"Incoming data: {data}")
+        inc_data = IncomingData(**data)
 
-        schema = {
-            "type": "object",
-            "properties": {
-                "rtsp_ip": {"type": "string"},
-                "user": {"type": "string"},
-                "password": {"type": "string"},
-            },
-            "required": ["rtsp_ip", "user", "password"]
-        }
-        try:
-            validate(data, schema)
-        except exceptions.ValidationError as e:
-            return e.message
-
-        ip = data['rtsp_ip']
-        user = data['user']
-        password = data['password']
-
-        a = Client(ip, user, password)
+        a = Client(inc_data.rtsp_ip,
+                   inc_data.user_data.admin_username,
+                   inc_data.user_data.admin_password)
         try:
             auth_status = a.user_check()
-            if auth_status.get("Auth") == "200":
+            if auth_status.get("Auth") == StatusCode.OK:
                 big_cam_json = (
-                    a.change_password(),
+                    a.change_password(inc_data.user_data),
                     a.get_time_config(),
                     a.get_ntp_config(),
                     a.get_stream_config(),
@@ -715,9 +886,77 @@ class Client:
                 return jsonify(big_cam_json)
             else:
                 return auth_status
-        except (ex.ConnectTimeout, ex.ConnectionError) as e:
-            log.exception(e)
-            raise e("Нет соединения с камерой")
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
+
+
+class StreamData(BaseModel):
+    videoCodecType: str = "H.264"
+    videoResolutionWidth: int = 1280
+    videoResolutionHeight: int = 720
+    videoQualityControlType: str = "VBR"
+    fixedQuality: int = 100
+    vbrUpperCap: int = 1024
+    maxFrameRate: int = 1200
+    GovLength: int = 20
+    mic: bool = False
+    audioCompressionType: str = "MP2L2"
+
+
+class NtpData(BaseModel):
+    ntp_ip: str
+    hostName: str
+    ntp_format: str = "ipaddress"  # or "hostName"
+
+
+class TimeZone(BaseModel):
+    timezone: int = 5
+
+
+class ChannelName(BaseModel):
+    is_enabled: bool = False
+
+
+class EmailData(BaseModel):
+    portNo: int
+    hostName: str
+    addressingFormatType: str
+
+
+class DnsData(BaseModel):
+    dns = ["", ""]
+
+
+class DetectionData(BaseModel):
+    sensitivityLevel: int
+    gridMap: str = "fffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffc"
+
+
+class UserData(BaseModel):
+    user_id: int = 1
+    admin_username: str = "admin"
+    admin_password: str = "tvmix333"
+    sub_username: str
+    sub_password: str
+
+
+class IncomingData(BaseModel):
+    rtsp_ip: str
+    user_data: UserData
+    ntp: NtpData
+    stream: StreamData
+    timezone: TimeZone
+    channel_name: ChannelName
+    email: EmailData
+    dns: DnsData
+    detection: DetectionData
 
 
 if __name__ == '__main__':
