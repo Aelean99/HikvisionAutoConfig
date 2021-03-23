@@ -4,9 +4,6 @@ import os
 import sys
 from textwrap import wrap
 from pydantic import BaseModel
-from typing import List
-
-from jsonschema import validate, exceptions
 
 from flask import Flask, jsonify
 from flask import request
@@ -187,8 +184,8 @@ class Client:
             xml_data = f'''
             <User>
                 <id>{data.user_id}</id>
-                <userName>{data.admin_username}</userName>
-                <password>{data.admin_password}</password>
+                <userName>{data.username}</userName>
+                <password>{data.password}</password>
             </User>
             '''
 
@@ -695,27 +692,26 @@ class Client:
     # Цель метода - сменить маску детекции на камере, когда клиент её поменял через ЛК
     # На вход должна поступить маска детекции в виде строки из 396 символов.
     # Значение символа: либо 1 либо 0. Если 1 - значит ячейка в ЛК активирована, и её нужно отрисовать на камере
-    def change_detection_mask(self, mask_from_lk=None):
-        if mask_from_lk is None:
-            mask_from_lk = \
-                "1111111111111111111111" \
-                "1111111111111111111111" \
-                "1111111111111111111111" \
-                "1111111111111111111111" \
-                "1111111111111111111111" \
-                "1111111111111111111111" \
-                "1111111111111111111111" \
-                "1111111111111111111111" \
-                "1111111111111111111111" \
-                "1111111111111111111111" \
-                "1111111111111111111111" \
-                "1111111111111111111111" \
-                "1111111111111111111111" \
-                "1111111111111111111111" \
-                "1111111111111111111111" \
-                "1111111111111111111111" \
-                "1111111111111111111111" \
-                "1111111111111111111111"
+    def change_detection_mask(self, data):
+        # mask_from_lk = \
+        #     "1111111111111111111111" \
+        #     "1111111111111111111111" \
+        #     "1111111111111111111111" \
+        #     "1111111111111111111111" \
+        #     "1111111111111111111111" \
+        #     "1111111111111111111111" \
+        #     "1111111111111111111111" \
+        #     "1111111111111111111111" \
+        #     "1111111111111111111111" \
+        #     "1111111111111111111111" \
+        #     "1111111111111111111111" \
+        #     "1111111111111111111111" \
+        #     "1111111111111111111111" \
+        #     "1111111111111111111111" \
+        #     "1111111111111111111111" \
+        #     "1111111111111111111111" \
+        #     "1111111111111111111111" \
+        #     "1111111111111111111111"
 
         # hex_values - это внутренние значения с камеры.
         # Grid маска внутри камеры представлена в виде 22 стобцов, и 18 строк
@@ -726,7 +722,7 @@ class Client:
         grid_for_cam = []  # Маска для камеры, будет вычислена далее в коде
 
         try:
-            array_22chars = wrap(mask_from_lk, 22)  # массив в ввиде ['1111111111111111111111']
+            array_22chars = wrap(data.maskFromLK, 22)  # массив в ввиде ['1111111111111111111111']
             for sub_array in array_22chars:
                 array_4chars = wrap(sub_array, 4)  # массив в виде ['1111', '1111', '1111', '1111', '1111', '11']
                 for sub_array1 in array_4chars:  # '1111'
@@ -765,11 +761,26 @@ class Client:
             log.debug("Ошибка запроса", e.response)
             return StatusCode.UnhandledExceptionError
 
-    @staticmethod
-    @app.route('/changePass', methods=["POST"])
-    def change_password():
-        data = request.get_json()
-        log.debug(f"Incoming data: {data}")
+    # Метод создания пользователя
+    def user_create(self, data):
+        try:
+            xml_data = f'''<User>
+                            <userName>{data.username}</userName>
+                            <password>{data.password}</password>
+                            <userLevel>{data.userLevel}</userLevel>
+                        </User>'''
+            response = self.post("Security/users", data=xml_data, auth=self.auth_type)
+            json_response = to_json(response)
+            return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
 
     # Метод смены маски детекции
     @staticmethod
@@ -777,36 +788,15 @@ class Client:
     def set_detection_mask():
         data = request.get_json()
         log.debug(f"Incoming data: {data}")
-        inc_data = IncomingData(**data)
-
-        schema = {
-            "type": "object",
-            "properties": {
-                "rtsp_ip": {"type": "string"},
-                "user": {"type": "string"},
-                "password": {"type": "string"},
-                "mask": {"type": "string", "minLength": 396, "maxLength": 396}
-            },
-            "required": ["rtsp_ip", "user", "password", "mask"]
-        }
-        try:
-            validate(data, schema)
-        except exceptions.ValidationError as e:
-            log.debug(e.message)
-            return e.message
-
-        ip = data['rtsp_ip']
-        user = data['user']
-        password = data['password']
-        mask = data['mask']
+        inc_data = ChangeMaskData(**data)
 
         a = Client(inc_data.rtsp_ip,
-                   inc_data.user_data.admin_username,
-                   inc_data.user_data.admin_password)
+                   inc_data.username,
+                   inc_data.password)
         try:
             auth_status = a.user_check()
             if auth_status.get("Auth") == StatusCode.OK:
-                return jsonify(a.change_detection_mask(mask_from_lk=mask))
+                return jsonify(a.change_detection_mask(inc_data))
             else:
                 return auth_status
         except ex.ConnectTimeout:
@@ -827,8 +817,8 @@ class Client:
         inc_data = IncomingData(**data)
 
         a = Client(inc_data.rtsp_ip,
-                   inc_data.user_data.admin_username,
-                   inc_data.user_data.admin_password)
+                   inc_data.admin_data.username,
+                   inc_data.admin_data.password)
         try:
             auth_status = a.user_check()
             if auth_status.get("Auth") == "200":
@@ -858,6 +848,7 @@ class Client:
             log.debug("Ошибка запроса", e.response)
             return StatusCode.UnhandledExceptionError
 
+    # Метод получения всей необходимой конфигурации с камеры
     @staticmethod
     @app.route('/get', methods=["POST"])
     def get_config():
@@ -866,13 +857,13 @@ class Client:
         inc_data = IncomingData(**data)
 
         a = Client(inc_data.rtsp_ip,
-                   inc_data.user_data.admin_username,
-                   inc_data.user_data.admin_password)
+                   inc_data.admin_data.username,
+                   inc_data.admin_data.password)
         try:
             auth_status = a.user_check()
             if auth_status.get("Auth") == StatusCode.OK:
                 big_cam_json = (
-                    a.change_password(inc_data.user_data),
+                    a.change_password(inc_data.admin_data),
                     a.get_time_config(),
                     a.get_ntp_config(),
                     a.get_stream_config(),
@@ -897,6 +888,7 @@ class Client:
             return StatusCode.UnhandledExceptionError
 
 
+# Для настройки видео-аудио потоков
 class StreamData(BaseModel):
     videoCodecType: str = "H.264"
     videoResolutionWidth: int = 1280
@@ -910,53 +902,95 @@ class StreamData(BaseModel):
     audioCompressionType: str = "MP2L2"
 
 
+# Для настройки NTP
 class NtpData(BaseModel):
     ntp_ip: str
     hostName: str
     ntp_format: str = "ipaddress"  # or "hostName"
 
 
+# Установка часового пояса
 class TimeZone(BaseModel):
     timezone: int = 5
 
 
+# Для выключения отображения имени канала на потоке
 class ChannelName(BaseModel):
     is_enabled: bool = False
 
 
+# Для настройки SMTP(EMAIL)
 class EmailData(BaseModel):
     portNo: int
     hostName: str
     addressingFormatType: str
 
 
+# Для смены DNS
 class DnsData(BaseModel):
     dns = ["", ""]
 
 
+# Для настройки default маски детекции
+# sensitivityLevel  - чувствительность детекции
+# gridMap           - готовая маска для настройки области детекции
 class DetectionData(BaseModel):
     sensitivityLevel: int
     gridMap: str = "fffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffc"
 
 
-class UserData(BaseModel):
+# Для инициализации конструктора
+# user_id           - id пользователя на камере. Учётная запись admin ВСЕГДА имеет user_id = 1
+# username          - имя пользователя, по умолчанию admin
+# password          - пароль от учётки admin
+class AdminData(BaseModel):
     user_id: int = 1
-    admin_username: str = "admin"
-    admin_password: str = "tvmix333"
-    sub_username: str
-    sub_password: str
+    username: str = "admin"
+    password: str
 
+
+# Для создания второго пользователя
+# user_id           - id пользователя на камере. Максимальное значение 16
+# username          - имя пользователя
+# password          - пароль от учётки пользователя
+# userLevel         - тип учётной записи. Возможные варианты: Administrator, Operator, Viewer
+class UserData(BaseModel):
+    user_id: int = 2
+    username: str
+    password: str
+    userLevel: str
+
+
+# Для полной настройки камеры
+# rtsp_ip           - ip адрес камеры которая будет настраиваться
+# admin_data        - данные об админской учётке
+# user_data         - данные об учётке пользователя
+# ntp               - данные для настройки NTP
+# timezone          - часовой пояс
+# stream            - данные для настройки Video и Audio конфигурации
+# channel_name      - вкл/выкл отображение названия камеры на потоке
+# email             - настройка smtp для отправки детекции
+# detection         - для установки стандартной маски
 
 class IncomingData(BaseModel):
     rtsp_ip: str
+    admin_data: AdminData
     user_data: UserData
     ntp: NtpData
-    stream: StreamData
     timezone: TimeZone
+    stream: StreamData
     channel_name: ChannelName
     email: EmailData
     dns: DnsData
     detection: DetectionData
+
+
+# Для смены маски детекции
+class ChangeMaskData(BaseModel):
+    rtsp_ip: str
+    username: str = "admin"
+    password: str = "tvmix333"
+    maskFromLK: str
 
 
 if __name__ == '__main__':
