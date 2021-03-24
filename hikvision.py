@@ -29,6 +29,7 @@ class StatusCode:
     Unauthorized = 401
     Locked = 403
     MethodNotFound = 404
+    DeviceError = 500
     NotPing = 801
     ConnectionError = 802
     UnhandledExceptionError = 803
@@ -113,7 +114,7 @@ class Client:
             # если пароль из конструктора подошёл - возвращем 200
             if r.status_code == 200 and "200" in r.text:
                 log.debug("Auth: Success")
-                return {"Auth": StatusCode.OK}
+                return StatusCode.OK
 
             elif r.status_code == 401 or "401" in r.text:
                 r_json = to_json(r)
@@ -121,7 +122,7 @@ class Client:
                 # если камера заблокирована из-за неуспешных попыток авторизации - не начинать перебор, вернуть ошибку
                 if "unlockTime" in r.text:
                     log.debug(f"Camera is locked, unlock time {r_json['userCheck']['unlockTime']} sec.")
-                    return {"Auth": StatusCode.Unauthorized}
+                    return StatusCode.Unauthorized
 
                 log.debug("Auth: Unauthorized")
 
@@ -144,28 +145,28 @@ class Client:
                     # если пароль из конструктора подошёл - возвращем 200
                     if r.status_code == 200 and "200" in r.text:
                         log.debug("Auth: Success")
-                        return {"Auth": StatusCode.OK}
+                        return StatusCode.OK
 
                     elif r.status_code == 401 or "401" in r.text:
                         # если камера заблокировалась из-за неуспешных попыток авторизации - прервать цикл,
                         # вернуть ошибку
                         if "unlockTime" in r.text:
                             log.debug(f"Camera is locked, unlock time {r_json['userCheck']['unlockTime']} sec.")
-                            return {"Auth": StatusCode.Unauthorized}
+                            return StatusCode.Unauthorized
                         log.debug("Auth: Unauthorized")
 
             elif r.status_code == 403:
                 log.debug("Auth: Forbidden(Camera is locked)")
-                return {"Auth": StatusCode.Locked}
+                return StatusCode.Locked
 
             # если на запрос вернулся статус 404 - то такого метода нет на устройстве
             # значит либо камера старая и не поддерживает такой метод, либо это не камера вовсе
             elif r.status_code == 404:
                 log.debug("Auth: Device is not supported")
-                return {"Auth": StatusCode.MethodNotFound}
+                return StatusCode.MethodNotFound
             else:
                 log.debug(f"Auth: Default error. Response status code {r.status_code}")
-                return {"Auth": r.status_code}
+                return r.status_code
         except ex.ConnectTimeout:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
@@ -771,6 +772,44 @@ class Client:
                         </User>'''
             response = self.post("Security/users", data=xml_data, auth=self.auth_type)
             json_response = to_json(response)
+            if response.status_code == StatusCode.DeviceError:
+                return "Perhaps user already created", json_response['ResponseStatus']['requestURL']
+            return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
+
+    # Настройка прав пользователя
+    def set_user_permissions(self, data):
+        try:
+            xml_data = f'''<UserPermission>
+                        <id>{data.userID}</id>
+                        <userID>{data.userID}</userID>
+                        <userType>{data.userType}</userType>
+                        <remotePermission>
+                            <playBack>{str(data.playBack).lower()}</playBack>
+                            <preview>{str(data.preview).lower()}</preview>
+                            <record>{str(data.record).lower()}</record>
+                            <ptzControl>{str(data.ptzControl).lower()}</ptzControl>
+                            <upgrade>{str(data.upgrade).lower()}</upgrade>
+                            <parameterConfig>{str(data.parameterConfig).lower()}</parameterConfig>
+                            <restartOrShutdown>{str(data.restartOrShutdown).lower()}</restartOrShutdown>
+                            <logOrStateCheck>{str(data.logOrStateCheck).lower()}</logOrStateCheck>
+                            <voiceTalk>{str(data.voiceTalk).lower()}</voiceTalk>
+                            <transParentChannel>{str(data.transParentChannel).lower()}</transParentChannel>
+                            <contorlLocalOut>{str(data.contorlLocalOut).lower()}</contorlLocalOut>
+                            <alarmOutOrUpload>{str(data.alarmOutOrUpload).lower()}</alarmOutOrUpload>
+                        </remotePermission>
+                    </UserPermission>'''
+
+            response = self.put(f"Security/UserPermission/{data.userID}", data=xml_data, auth=self.auth_type)
+            json_response = to_json(response)
             return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
         except ex.ConnectTimeout:
             log.debug("Камера не пингуется")
@@ -795,10 +834,10 @@ class Client:
                    inc_data.password)
         try:
             auth_status = a.user_check()
-            if auth_status.get("Auth") == StatusCode.OK:
+            if auth_status == StatusCode.OK:
                 return jsonify(a.change_detection_mask(inc_data))
             else:
-                return auth_status
+                return str(auth_status)
         except ex.ConnectTimeout:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
@@ -837,7 +876,7 @@ class Client:
                 log.debug(json.dumps(big_cam_json, indent=4))
                 return big_cam_json
             else:
-                return auth_status
+                return str(auth_status)
         except ex.ConnectTimeout:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
@@ -861,7 +900,7 @@ class Client:
                    inc_data.admin_data.password)
         try:
             auth_status = a.user_check()
-            if auth_status.get("Auth") == StatusCode.OK:
+            if auth_status == StatusCode.OK:
                 big_cam_json = (
                     a.change_password(inc_data.admin_data),
                     a.get_time_config(),
@@ -876,7 +915,7 @@ class Client:
                 log.debug(json.dumps(big_cam_json, indent=4))
                 return jsonify(big_cam_json)
             else:
-                return auth_status
+                return str(auth_status)
         except ex.ConnectTimeout:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
@@ -931,6 +970,37 @@ class DnsData(BaseModel):
     dns = ["", ""]
 
 
+# userID                - id пользователя
+# userType              - admin, operator, viewer
+# playBack              - воспроизвение архива с флешки
+# preview               - онлайн просмотр
+# record                - Ручная запись
+# ptzControl            - управление PTZ
+# upgrade               - обновление/форматирование
+# parameterConfig       - изменение параметров камеры, битрейт, звук и тп
+# restartOrShutdown     - выключение и перезагрузка
+# logOrStateCheck       - Поиск по логам, чтение статуса
+# voiceTalk             - двусторонний звук(передать голос на динамик камеры)
+# transParentChannel    - настройка последовательного порта
+# contorlLocalOut(не помарк       - настройка видео-выхода
+# alarmOutOrUpload      - центр уведомлений/тревожные выходы
+class UserPermission(BaseModel):
+    userID: int
+    userType: str
+    playBack: bool
+    preview: bool
+    record: bool
+    ptzControl: bool
+    upgrade: bool
+    parameterConfig: bool
+    restartOrShutdown: bool
+    logOrStateCheck: bool
+    voiceTalk: bool
+    transParentChannel: bool
+    contorlLocalOut: bool
+    alarmOutOrUpload: bool
+
+
 # Для настройки default маски детекции
 # sensitivityLevel  - чувствительность детекции
 # gridMap           - готовая маска для настройки области детекции
@@ -976,6 +1046,7 @@ class IncomingData(BaseModel):
     rtsp_ip: str
     admin_data: AdminData
     user_data: UserData
+    user_permission: UserPermission
     ntp: NtpData
     timezone: TimeZone
     stream: StreamData
