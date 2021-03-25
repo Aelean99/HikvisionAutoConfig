@@ -80,25 +80,12 @@ class Client:
         self.basic = HTTPBasicAuth(self.user, password)
         self.digest = HTTPDigestAuth(self.user, password)
 
-    def __setitem__(self, value):
-        self.auth_type = value
-
     def check_auth_type(self):
-        try:
-            r = self.get("Security/userCheck", auth=self.basic)
-            if r.headers.__contains__("WWW-Authenticate"):
-                self.__setitem__("digest")
-            else:
-                self.__setitem__("basic")
-        except (ex.ConnectTimeout, ex.ConnectionError) as e:
-            raise e("Нет соединения с камерой")
-
-    # Метод подстановки авторизации в запросы
-    def current_auth_type(self):
-        if self.auth_type == "basic":
-            return self.basic
+        r = self.get("Security/userCheck", auth=self.basic)
+        if "WWW-Authenticate" in r.headers:
+            self.auth_type = self.digest
         else:
-            return self.digest
+            self.auth_type = self.basic
 
     # Метод проверки текущего пароля на камеру
     def user_check(self):
@@ -108,8 +95,7 @@ class Client:
             self.check_auth_type()
 
             # проверяем текущий пароль на камере и конвертируем xml ответ камеры в json
-            r = self.get("Security/userCheck", auth=self.current_auth_type())
-            r_json = to_json(r)
+            r = self.get("Security/userCheck", auth=self.auth_type)
 
             # если пароль из конструктора подошёл - возвращем 200
             if r.status_code == 200 and "200" in r.text:
@@ -860,19 +846,21 @@ class Client:
                    inc_data.admin_data.password)
         try:
             auth_status = a.user_check()
-            if auth_status.get("Auth") == "200":
-                big_cam_json = (
-                    a.change_password(),
-                    a.set_email_config(),
-                    a.set_ntp_config(),
-                    a.set_eth_config(),
-                    a.set_stream_config(mic),
-                    a.set_time_config(),
-                    a.set_osd_channel_config(),
-                    a.set_osd_datetime_config(),
-                    a.set_alarm_notifications_config(),
-                    a.set_detection_config()
-                )
+            if auth_status == StatusCode.OK:
+                big_cam_json = {
+                    "password": a.change_password(inc_data.admin_data),
+                    "user_create": a.user_create(inc_data.user_data),
+                    "user_permission": a.set_user_permissions(inc_data.user_permission),
+                    "email": a.set_email_config(inc_data.email),
+                    "ntp": a.set_ntp_config(inc_data.ntp),
+                    "dns": a.set_eth_config(inc_data.dns),
+                    "stream": a.set_stream_config(inc_data.stream),
+                    "time": a.set_time_config(inc_data.timezone),
+                    "osd_channel": a.set_osd_channel_config(inc_data.channel_name),
+                    "osd_datetime": a.set_osd_datetime_config(),
+                    "alarm_notifications": a.set_alarm_notifications_config(),
+                    "detection": a.set_detection_config(inc_data.detection)
+                }
                 log.debug(json.dumps(big_cam_json, indent=4))
                 return big_cam_json
             else:
