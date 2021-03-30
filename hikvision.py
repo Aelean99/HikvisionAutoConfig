@@ -881,7 +881,7 @@ class Client:
     def get_config():
         data = request.get_json()
         log.debug(f"Incoming data: {data}")
-        inc_data = IncomingData(**data)
+        inc_data = InitData(**data)
 
         a = Client(inc_data.rtsp_ip,
                    inc_data.admin_data.username,
@@ -1050,6 +1050,11 @@ class ChangeMaskData(BaseModel):
     username: str = "admin"
     password: str = "tvmix333"
     maskFromLK: str
+
+
+class InitData(BaseModel):
+    rtsp_ip: str
+    admin_data: AdminData
 
 
 if __name__ == '__main__':
