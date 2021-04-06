@@ -3,17 +3,19 @@ import logging
 import os
 import sys
 from textwrap import wrap
-from pydantic import BaseModel
 
-from flask import Flask, jsonify
-from flask import request
-from requests import session
-
-from requests.auth import HTTPBasicAuth, HTTPDigestAuth
 import requests.exceptions as ex
+import uvicorn
 import xmltodict
+from fastapi import FastAPI
+from pydantic import BaseModel
+from requests import session
+from requests.auth import HTTPBasicAuth, HTTPDigestAuth
 
-app = Flask(__name__)
+from data_models \
+    import Stream, TwoWayAudioChannel, Notifications, Detection, OsdCN, OsdDT, Email, Ethernet, Ntp, Time, UserList
+
+app = FastAPI()
 
 log = logging.getLogger("hikvision")
 log.setLevel(logging.DEBUG)
@@ -24,15 +26,194 @@ console_handler.setFormatter(logging.Formatter('[%(asctime)s %(filename)s:%(line
 log.addHandler(console_handler)
 
 
+class GetData(BaseModel):
+    rtsp_ip: str
+    username: str = "admin"
+    password: str = "tvmix333"
+    user_id: int = 1
+
+
+# Для настройки видео-аудио потоков
+class StreamData(BaseModel):
+    videoCodecType: str = "H.264"
+    videoResolutionWidth: int = 1280
+    videoResolutionHeight: int = 720
+    videoQualityControlType: str = "VBR"
+    fixedQuality: int = 100
+    vbrUpperCap: int = 1024
+    maxFrameRate: int = 1200
+    GovLength: int = 20
+    mic: bool = False
+    audioCompressionType: str = "MP2L2"
+    audioBitRate: int = 128
+
+
+# Для настройки NTP
+class NtpData(BaseModel):
+    ntp_ip: str
+    hostName: str
+    ntp_format: str = "ipaddress"  # or "hostName"
+
+
+# Установка часового пояса
+class TimeZone(BaseModel):
+    timezone: str = "CST-5:00:00"
+
+
+# Для выключения отображения имени канала на потоке
+class ChannelName(BaseModel):
+    is_enabled: bool = False
+
+
+# Для настройки SMTP(EMAIL)
+class EmailData(BaseModel):
+    portNo: int
+    hostName: str
+    addressingFormatType: str
+
+
+# Для смены DNS
+class DnsData(BaseModel):
+    dns = ["", ""]
+
+
+# userID                - id пользователя
+# userType              - admin, operator, viewer
+# playBack              - воспроизвение архива с флешки
+# preview               - онлайн просмотр
+# record                - Ручная запись
+# ptzControl            - управление PTZ
+# upgrade               - обновление/форматирование
+# parameterConfig       - изменение параметров камеры, битрейт, звук и тп
+# restartOrShutdown     - выключение и перезагрузка
+# logOrStateCheck       - Поиск по логам, чтение статуса
+# voiceTalk             - двусторонний звук(передать голос на динамик камеры)
+# transParentChannel    - настройка последовательного порта
+# contorlLocalOut(не помарк       - настройка видео-выхода
+# alarmOutOrUpload      - центр уведомлений/тревожные выходы
+class UserPermission(BaseModel):
+    userID: int
+    userType: str
+    playBack: bool
+    preview: bool
+    record: bool
+    ptzControl: bool
+    upgrade: bool
+    parameterConfig: bool
+    restartOrShutdown: bool
+    logOrStateCheck: bool
+    voiceTalk: bool
+    transParentChannel: bool
+    contorlLocalOut: bool
+    alarmOutOrUpload: bool
+
+
+# Для настройки default маски детекции
+# sensitivityLevel  - чувствительность детекции
+# gridMap           - готовая маска для настройки области детекции
+class DetectionData(BaseModel):
+    sensitivityLevel: int
+    gridMap: str = "fffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffc"
+
+
+# Для инициализации конструктора
+# user_id           - id пользователя на камере. Учётная запись admin ВСЕГДА имеет user_id = 1
+# username          - имя пользователя, по умолчанию admin
+# password          - пароль от учётки admin
+class AdminData(BaseModel):
+    user_id: int = 1
+    username: str = "admin"
+    password: str
+
+
+# Для создания второго пользователя
+# user_id           - id пользователя на камере. Максимальное значение 16
+# username          - имя пользователя
+# password          - пароль от учётки пользователя
+# userLevel         - тип учётной записи. Возможные варианты: Administrator, Operator, Viewer
+class UserData(BaseModel):
+    user_id: int = 2
+    username: str
+    password: str
+    userLevel: str
+
+
+class AudioData(BaseModel):
+    audioCompressionType: str
+    microphoneVolume: int
+    noisereduce: bool
+    audioBitRate: int
+    audioInputType: str
+
+
+# Для полной настройки камеры
+# rtsp_ip           - ip адрес камеры которая будет настраиваться
+# admin_data        - данные об админской учётке
+# user_data         - данные об учётке пользователя
+# ntp               - данные для настройки NTP
+# timezone          - часовой пояс
+# stream            - данные для настройки Video и Audio конфигурации
+# channel_name      - вкл/выкл отображение названия камеры на потоке
+# email             - настройка smtp для отправки детекции
+# detection         - для установки стандартной маски
+class IncomingData(BaseModel):
+    rtsp_ip: str
+    admin_data: AdminData
+    user_data: UserData
+    user_permission: UserPermission
+    ntp: NtpData
+    timezone: TimeZone
+    stream: StreamData
+    audio: AudioData
+    channel_name: ChannelName
+    email: EmailData
+    dns: DnsData
+    detection: DetectionData
+
+
+# Для смены маски детекции
+class ChangeMaskData(BaseModel):
+    rtsp_ip: str
+    username: str = "admin"
+    password: str = "tvmix333"
+    maskFromLK: str
+
+
 class StatusCode:
     OK = 200
     Unauthorized = 401
     Locked = 403
     MethodNotFound = 404
-    DeviceError = 500
-    NotPing = 801
-    ConnectionError = 802
-    UnhandledExceptionError = 803
+
+    # Exceptions Error
+    NotPing = 800
+    ConnectionError = 801
+    UnhandledExceptionError = 802
+    EmptyResponse = 803
+
+    # Cam responses
+    # Device Busy - for a command which cannot be processed at that time
+    # (i.e. if the device receives a reboot command during upgrading process)
+    DeviceBusy = 900
+
+    # Device Error - if the device can not perform the request for a hardware error.
+    # An error message in statusString format to indicate operation failure
+    DeviceError = 901
+
+    # Invalid Operation” - either if the operation is not supported by the device, or if
+    # the user has not passed the authentication, or if the user does not have enough privilege for this operation
+    InvalidOperation = 902
+
+    # Invalid XML Format - if the XML format is not recognized by the system.
+    # There will be statusString returned to represent different errors
+    InvalidXmlFormat = 903
+
+    # Invalid XML Content - an incomplete message or a message containing an
+    # out-of-range parameter. Relative statusString will be return.
+    InvalidXmlContent = 904
+
+    # Reboot Required = If a reboot is required before the operation taking effect
+    RebootRequired = 905
 
 
 class Get:
@@ -61,8 +242,46 @@ class Post:
 
 def to_json(response):
     xml_dict = xmltodict.parse(response.content)
-    json_response = json.loads(json.dumps(xml_dict))
+    json_response = dict(json.loads(json.dumps(xml_dict)))
     return json_response
+
+
+# конвертирование строк в типизированные значения
+def decode(obj):
+    if isinstance(obj, str):  # Если текущий объект - строка
+        if "true" in obj:  # И внутри строки true
+            return True  # вернуть True
+        elif "false" in obj:  # или внутри строки false
+            return False  # вернуть False
+
+        try:  # Пробуем
+            return int(obj)  # сконвертить в int
+        except ValueError:  # если не конвертится
+            return obj  # вернуть в исходном виде
+    elif isinstance(obj, dict):  # Если dict
+        return {key: decode(value) for key, value in obj.items()}  # то для каждого ключа пробуем сконвертить значение
+    elif isinstance(obj, list) or isinstance(obj, tuple):
+        return [decode(value) for value in obj]
+    else:
+        return obj
+
+
+# Проверка ответа камеры
+def check_cam_response(response):
+    if "OK" in response['ResponseStatus']['statusString']:
+        return StatusCode.OK
+    elif "Device Busy" in response['ResponseStatus']['statusString']:
+        return StatusCode.DeviceBusy
+    elif "Device Error" in response['ResponseStatus']['statusString']:
+        return StatusCode.DeviceError
+    elif "Invalid Operation" in response['ResponseStatus']['statusString']:
+        return StatusCode.InvalidOperation
+    elif "Invalid XML Format" in response['ResponseStatus']['statusString']:
+        return StatusCode.InvalidXmlFormat
+    elif "Invalid XML Content" in response['ResponseStatus']['statusString']:
+        return StatusCode.InvalidXmlContent
+    elif "Reboot Required" in response['ResponseStatus']['statusString']:
+        return StatusCode.RebootRequired
 
 
 class Client:
@@ -80,6 +299,7 @@ class Client:
         self.basic = HTTPBasicAuth(self.user, password)
         self.digest = HTTPDigestAuth(self.user, password)
 
+    # Проверить тип авторизации
     def check_auth_type(self):
         r = self.get("Security/userCheck", auth=self.basic)
         if "WWW-Authenticate" in r.headers:
@@ -176,8 +396,8 @@ class Client:
             </User>
             '''
 
-            r = self.put(f"Security/users/{data.user_id}", data=xml_data, auth=self.auth_type)
-            return {"Auth": r.status_code}
+            response = self.put(f"Security/users/{data.user_id}", data=xml_data, auth=self.auth_type)
+            return to_json(response)
         except ex.ConnectTimeout:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
@@ -192,7 +412,37 @@ class Client:
     def device_info(self):
         try:
             response = self.get("System/deviceInfo", auth=self.auth_type)
-            return StatusCode.OK, to_json(response)
+            return to_json(response)
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            raise StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            raise StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            raise StatusCode.UnhandledExceptionError
+
+    def get_users(self):
+        try:
+            response = self.get("Security/users", auth=self.auth_type)
+            return to_json(response)
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            raise StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            raise StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            raise StatusCode.UnhandledExceptionError
+
+    # Получить конфиг сети с камеры
+    # ip, маска, шлюз и т.п
+    def get_eth_config(self):
+        try:
+            response = self.get("System/Network/interfaces/1/ipAddress", auth=self.auth_type)
+            return to_json(response)
         except ex.ConnectTimeout:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
@@ -203,12 +453,38 @@ class Client:
             log.debug("Ошибка запроса", e.response)
             return StatusCode.UnhandledExceptionError
 
-    # Получить конфиг сети с камеры
-    # ip, маска, шлюз и т.п
-    def get_eth_config(self):
+    def get_audio_config(self):
         try:
-            response = self.get("System/Network/interfaces/1/ipAddress", auth=self.auth_type)
-            return StatusCode.OK, to_json(response)
+            response = self.get("System/TwoWayAudio/channels/1", auth=self.auth_type)
+            return to_json(response)
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
+
+    def get_stream_dynamic_cap(self):
+        try:
+            response = self.get("Streaming/channels/101/dynamicCap", auth=self.auth_type)
+            return to_json(response)
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
+
+    def get_stream_capabilities(self):
+        try:
+            response = self.get("Streaming/channels/101/capabilities", auth=self.auth_type)
+            return to_json(response)
         except ex.ConnectTimeout:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
@@ -359,64 +635,55 @@ class Client:
     # Сменить DNS
     def set_eth_config(self, data):
         current_eth_data = self.get_eth_config()
+        addressing_type = current_eth_data['IPAddress']['addressingType']
 
-        if current_eth_data[0] == StatusCode.OK:
-            ethernet_config = current_eth_data[1]
-            addressing_type = ethernet_config['IPAddress']['addressingType']
+        if addressing_type != "static":
+            return f"Addressing type is {addressing_type}. Can`t set DNS"
+        ip_address = current_eth_data['IPAddress']['ipAddress']
+        subnet_mask = current_eth_data['IPAddress']['subnetMask']
+        gateway = current_eth_data['IPAddress']['DefaultGateway']['ipAddress']
 
-            if addressing_type != "static":
-                return f"Addressing type is {addressing_type}. Can`t set DNS"
-            ip_address = ethernet_config['IPAddress']['ipAddress']
-            subnet_mask = ethernet_config['IPAddress']['subnetMask']
-            gateway = ethernet_config['IPAddress']['DefaultGateway']['ipAddress']
+        xml_data = f'''<IPAddress>
+                            <ipVersion>v4</ipVersion>
+                            <addressingType>static</addressingType>
+                            <ipAddress>{ip_address}</ipAddress>
+                            <subnetMask>{subnet_mask}</subnetMask>
+                            <DefaultGateway>
+                                <ipAddress>{gateway}</ipAddress>
+                            </DefaultGateway>
+                            <PrimaryDNS>
+                                <ipAddress>{data.dns[0]}</ipAddress>
+                            </PrimaryDNS>
+                            <SecondaryDNS>
+                                <ipAddress>{data.dns[1]}</ipAddress>
+                            </SecondaryDNS>
+                            <Ipv6Mode>
+                                <ipV6AddressingType>ra</ipV6AddressingType>
+                                <ipv6AddressList>
+                                    <v6Address>
+                                        <id>1</id>
+                                        <type>manual</type>
+                                        <address>::</address>
+                                        <bitMask>0</bitMask>
+                                    </v6Address>
+                                </ipv6AddressList>
+                            </Ipv6Mode>
+                        </IPAddress>'''
 
-            xml_data = f'''<IPAddress>
-                                <ipVersion>v4</ipVersion>
-                                <addressingType>static</addressingType>
-                                <ipAddress>{ip_address}</ipAddress>
-                                <subnetMask>{subnet_mask}</subnetMask>
-                                <DefaultGateway>
-                                    <ipAddress>{gateway}</ipAddress>
-                                </DefaultGateway>
-                                <PrimaryDNS>
-                                    <ipAddress>{data.dns[0]}</ipAddress>
-                                </PrimaryDNS>
-                                <SecondaryDNS>
-                                    <ipAddress>{data.dns[1]}</ipAddress>
-                                </SecondaryDNS>
-                                <Ipv6Mode>
-                                    <ipV6AddressingType>ra</ipV6AddressingType>
-                                    <ipv6AddressList>
-                                        <v6Address>
-                                            <id>1</id>
-                                            <type>manual</type>
-                                            <address>::</address>
-                                            <bitMask>0</bitMask>
-                                        </v6Address>
-                                    </ipv6AddressList>
-                                </Ipv6Mode>
-                            </IPAddress>'''
+        try:
+            response = self.put("System/Network/interfaces/1/ipAddress", data=xml_data, auth=self.auth_type)
+            json_response = to_json(response)
+            return check_cam_response(json_response)
 
-            try:
-                response = self.put("System/Network/interfaces/1/ipAddress", data=xml_data, auth=self.auth_type)
-                json_response = to_json(response)
-                return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
-            except ex.ConnectTimeout:
-                log.debug("Камера не пингуется")
-                return StatusCode.NotPing
-            except ex.ConnectionError:
-                log.debug("Ошибка соединения с камерой")
-                return StatusCode.ConnectionError
-            except ex.RequestException as e:
-                log.debug("Ошибка запроса", e.response)
-                return StatusCode.UnhandledExceptionError
-
-        elif current_eth_data[0] == StatusCode.NotPing:
-            return "Камера не пингуется"
-        elif current_eth_data[0] == StatusCode.ConnectionError:
-            return "Ошибка соединения с камерой"
-        elif current_eth_data[0] == StatusCode.UnhandledExceptionError:
-            return "Ошибка запроса"
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
 
     # Настроить Video-Audio конфигурацию
     def set_stream_config(self, data):
@@ -435,13 +702,46 @@ class Client:
                 <Audio>
                     <enabled>{str(data.mic).lower()}</enabled>
                     <audioCompressionType>{data.audioCompressionType}</audioCompressionType>
+                    <audioBitRate>{data.audioBitRate}</audioBitRate>
                 </Audio>
             </StreamingChannel>'''
 
         try:
             response = self.put("Streaming/channels/101", data=xml_data, auth=self.auth_type)
             json_response = to_json(response)
-            return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
+            return check_cam_response(json_response)
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
+
+    def set_audio_config(self, data):
+        xml_data = f'''
+        <TwoWayAudioChannel>
+            <id>1</id>
+            <enabled>true</enabled>
+            <audioCompressionType>{data.audioCompressionType}</audioCompressionType>
+            <microphoneVolume>{data.microphoneVolume}</microphoneVolume>
+            <noisereduce>{str(data.noisereduce).lower()}</noisereduce>
+            <audioBitRate>{data.audioBitRate}</audioBitRate>
+            <audioInputType>{data.audioInputType}</audioInputType>
+            <associateVideoInputs>
+                <enabled>true</enabled>
+                <videoInputChannelList>
+                    <videoInputChannelID>1</videoInputChannelID>
+                </videoInputChannelList>
+            </associateVideoInputs>
+        </TwoWayAudioChannel>
+        '''
+        try:
+            response = self.put("System/TwoWayAudio/channels/1", data=xml_data, auth=self.auth_type)
+            json_response = to_json(response)
+            return check_cam_response(json_response)
         except ex.ConnectTimeout:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
@@ -456,8 +756,8 @@ class Client:
     def set_email_config(self, data):
         device_info = self.device_info()
         if device_info is None:
-            return "device_info is empty"
-        serial_number = device_info[1]['DeviceInfo']['serialNumber']
+            return StatusCode.EmptyResponse
+        serial_number = device_info['DeviceInfo']['serialNumber']
         cam_email = f"HK-{serial_number}@camera.ru"
         xml_data = f'''
                 <mailing>
@@ -493,7 +793,7 @@ class Client:
         try:
             response = self.put("System/Network/mailing/1", data=xml_data, auth=self.auth_type)
             json_response = to_json(response)
-            return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
+            return check_cam_response(json_response)
         except ex.ConnectTimeout:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
@@ -518,7 +818,7 @@ class Client:
         try:
             response = self.put("System/time/NtpServers/1", data=xml_data, auth=self.auth_type)
             json_response = to_json(response)
-            return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
+            return check_cam_response(json_response)
         except ex.ConnectTimeout:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
@@ -534,14 +834,14 @@ class Client:
         xml_data = f'''
             <Time>
                 <timeMode>NTP</timeMode>
-                <timeZone>CST-{data.timezone}:00:00</timeZone>
+                <timeZone>{data.timezone}</timeZone>
             </Time>
         '''
 
         try:
             response = self.put("System/time", data=xml_data, auth=self.auth_type)
             json_response = to_json(response)
-            return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
+            return check_cam_response(json_response)
         except ex.ConnectTimeout:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
@@ -566,7 +866,7 @@ class Client:
             response = self.put("System/Video/inputs/channels/1/overlays/channelNameOverlay", data=xml_data,
                                 auth=self.auth_type)
             json_response = to_json(response)
-            return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
+            return check_cam_response(json_response)
         except ex.ConnectTimeout:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
@@ -593,7 +893,7 @@ class Client:
             response = self.put("System/Video/inputs/channels/1/overlays/dateTimeOverlay",
                                 data=xml_data, auth=self.auth_type)
             json_response = to_json(response)
-            return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
+            return check_cam_response(json_response)
         except ex.ConnectTimeout:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
@@ -626,7 +926,7 @@ class Client:
             response = self.put("Event/triggers/VMD-1/notifications",
                                 data=xml_data, auth=self.auth_type)
             json_response = to_json(response)
-            return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
+            return check_cam_response(json_response)
         except ex.ConnectTimeout:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
@@ -665,7 +965,22 @@ class Client:
             response = self.put("System/Video/inputs/channels/1/motionDetection",
                                 data=xml_data, auth=self.auth_type)
             json_response = to_json(response)
-            return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
+            return check_cam_response(json_response)
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
+
+    def reboot(self):
+        try:
+            response = self.put("System/reboot", data="", auth=self.auth_type)
+            json_response = to_json(response)
+            return check_cam_response(json_response)
         except ex.ConnectTimeout:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
@@ -737,7 +1052,7 @@ class Client:
                 self.put("System/Video/inputs/channels/1/motionDetection/layout/gridLayout", data=xml_data,
                          auth=self.auth_type)
             json_response = to_json(response)
-            return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
+            return check_cam_response(json_response)
         except ex.ConnectTimeout:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
@@ -759,8 +1074,8 @@ class Client:
             response = self.post("Security/users", data=xml_data, auth=self.auth_type)
             json_response = to_json(response)
             if response.status_code == StatusCode.DeviceError:
-                return "Perhaps user already created", json_response['ResponseStatus']['requestURL']
-            return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
+                return "User already created"
+            return check_cam_response(json_response)
         except ex.ConnectTimeout:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
@@ -796,7 +1111,7 @@ class Client:
 
             response = self.put(f"Security/UserPermission/{data.userID}", data=xml_data, auth=self.auth_type)
             json_response = to_json(response)
-            return json_response['ResponseStatus']['statusString'], json_response['ResponseStatus']['requestURL']
+            return check_cam_response(json_response)
         except ex.ConnectTimeout:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
@@ -809,11 +1124,9 @@ class Client:
 
     # Метод смены маски детекции
     @staticmethod
-    @app.route('/setMask', methods=["POST"])
-    def set_detection_mask():
-        data = request.get_json()
-        log.debug(f"Incoming data: {data}")
-        inc_data = ChangeMaskData(**data)
+    @app.post("/setMask")
+    async def set_detection_mask(inc_data: ChangeMaskData):
+        log.debug(f"Incoming data: {inc_data}")
 
         a = Client(inc_data.rtsp_ip,
                    inc_data.username,
@@ -821,9 +1134,9 @@ class Client:
         try:
             auth_status = a.user_check()
             if auth_status == StatusCode.OK:
-                return jsonify(a.change_detection_mask(inc_data))
+                return a.change_detection_mask(inc_data)
             else:
-                return str(auth_status)
+                return auth_status
         except ex.ConnectTimeout:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
@@ -835,11 +1148,9 @@ class Client:
             return StatusCode.UnhandledExceptionError
 
     @staticmethod
-    @app.route('/set', methods=["POST"])
-    def set_config():
-        data = request.get_json()
-        log.debug(f"Incoming data: {data}")
-        inc_data = IncomingData(**data)
+    @app.post('/set')
+    async def set_config(inc_data: IncomingData):
+        log.debug(f"Incoming data: {inc_data}")
 
         a = Client(inc_data.rtsp_ip,
                    inc_data.admin_data.username,
@@ -855,6 +1166,7 @@ class Client:
                     "ntp": a.set_ntp_config(inc_data.ntp),
                     "dns": a.set_eth_config(inc_data.dns),
                     "stream": a.set_stream_config(inc_data.stream),
+                    "audio": a.set_audio_config(inc_data.audio),
                     "time": a.set_time_config(inc_data.timezone),
                     "osd_channel": a.set_osd_channel_config(inc_data.channel_name),
                     "osd_datetime": a.set_osd_datetime_config(),
@@ -864,7 +1176,7 @@ class Client:
                 log.debug(json.dumps(big_cam_json, indent=4))
                 return big_cam_json
             else:
-                return str(auth_status)
+                return auth_status
         except ex.ConnectTimeout:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
@@ -877,33 +1189,45 @@ class Client:
 
     # Метод получения всей необходимой конфигурации с камеры
     @staticmethod
-    @app.route('/get', methods=["POST"])
-    def get_config():
-        data = request.get_json()
-        log.debug(f"Incoming data: {data}")
-        inc_data = InitData(**data)
+    @app.post("/get")
+    async def get_config(get_data: GetData):
+        log.debug(f"Incoming data: {get_data}")
 
-        a = Client(inc_data.rtsp_ip,
-                   inc_data.admin_data.username,
-                   inc_data.admin_data.password)
+        a = Client(get_data.rtsp_ip,
+                   get_data.username,
+                   get_data.password)
         try:
             auth_status = a.user_check()
             if auth_status == StatusCode.OK:
-                big_cam_json = (
-                    a.change_password(inc_data.admin_data),
-                    a.get_time_config(),
-                    a.get_ntp_config(),
-                    a.get_stream_config(),
-                    a.get_email_config(),
-                    a.get_osd_datetime_config(),
-                    a.get_osd_channel_name_config(),
-                    a.get_detection_config(),
-                    a.get_event_notification_config()
-                )
-                log.debug(json.dumps(big_cam_json, indent=4))
-                return jsonify(big_cam_json)
+                time = Time(**a.get_time_config())
+                ntp = Ntp(**a.get_ntp_config())
+                eth = Ethernet(**a.get_eth_config())
+                email = Email(**a.get_email_config())
+                osd_datetime = OsdDT(**a.get_osd_datetime_config())
+                osd_channel_name = OsdCN(**a.get_osd_channel_name_config())
+                detection = Detection(**a.get_detection_config())
+                notifications = Notifications(**a.get_event_notification_config())
+                stream = Stream(**a.get_stream_config())
+                audio = TwoWayAudioChannel(**a.get_audio_config())
+                users = UserList(**a.get_users())
+                json_data = {
+                    "change_password": check_cam_response(a.change_password(get_data)),
+                    "time": time.Time.dict(),
+                    "ntp": ntp.NTPServer.dict(),
+                    "eth": eth.IPAddress.dict(),
+                    "email": email.mailing.dict(),
+                    "osd_datetime": osd_datetime.OsdDatetime.dict(),
+                    "osd_channel_name": osd_channel_name.channelNameOverlay.dict(),
+                    "detection": detection.MotionDetection.dict(),
+                    "notifications": notifications.EventTriggerNotificationList.EventTriggerNotification.dict(),
+                    "stream": stream.StreamingChannel.dict(),
+                    "audio": audio.dict(),
+                    "users": users.UserList.dict()
+                }
+                print(users)
+                return json_data
             else:
-                return str(auth_status)
+                return auth_status
         except ex.ConnectTimeout:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
@@ -915,147 +1239,5 @@ class Client:
             return StatusCode.UnhandledExceptionError
 
 
-# Для настройки видео-аудио потоков
-class StreamData(BaseModel):
-    videoCodecType: str = "H.264"
-    videoResolutionWidth: int = 1280
-    videoResolutionHeight: int = 720
-    videoQualityControlType: str = "VBR"
-    fixedQuality: int = 100
-    vbrUpperCap: int = 1024
-    maxFrameRate: int = 1200
-    GovLength: int = 20
-    mic: bool = False
-    audioCompressionType: str = "MP2L2"
-
-
-# Для настройки NTP
-class NtpData(BaseModel):
-    ntp_ip: str
-    hostName: str
-    ntp_format: str = "ipaddress"  # or "hostName"
-
-
-# Установка часового пояса
-class TimeZone(BaseModel):
-    timezone: int = 5
-
-
-# Для выключения отображения имени канала на потоке
-class ChannelName(BaseModel):
-    is_enabled: bool = False
-
-
-# Для настройки SMTP(EMAIL)
-class EmailData(BaseModel):
-    portNo: int
-    hostName: str
-    addressingFormatType: str
-
-
-# Для смены DNS
-class DnsData(BaseModel):
-    dns = ["", ""]
-
-
-# userID                - id пользователя
-# userType              - admin, operator, viewer
-# playBack              - воспроизвение архива с флешки
-# preview               - онлайн просмотр
-# record                - Ручная запись
-# ptzControl            - управление PTZ
-# upgrade               - обновление/форматирование
-# parameterConfig       - изменение параметров камеры, битрейт, звук и тп
-# restartOrShutdown     - выключение и перезагрузка
-# logOrStateCheck       - Поиск по логам, чтение статуса
-# voiceTalk             - двусторонний звук(передать голос на динамик камеры)
-# transParentChannel    - настройка последовательного порта
-# contorlLocalOut(не помарк       - настройка видео-выхода
-# alarmOutOrUpload      - центр уведомлений/тревожные выходы
-class UserPermission(BaseModel):
-    userID: int
-    userType: str
-    playBack: bool
-    preview: bool
-    record: bool
-    ptzControl: bool
-    upgrade: bool
-    parameterConfig: bool
-    restartOrShutdown: bool
-    logOrStateCheck: bool
-    voiceTalk: bool
-    transParentChannel: bool
-    contorlLocalOut: bool
-    alarmOutOrUpload: bool
-
-
-# Для настройки default маски детекции
-# sensitivityLevel  - чувствительность детекции
-# gridMap           - готовая маска для настройки области детекции
-class DetectionData(BaseModel):
-    sensitivityLevel: int
-    gridMap: str = "fffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffc"
-
-
-# Для инициализации конструктора
-# user_id           - id пользователя на камере. Учётная запись admin ВСЕГДА имеет user_id = 1
-# username          - имя пользователя, по умолчанию admin
-# password          - пароль от учётки admin
-class AdminData(BaseModel):
-    user_id: int = 1
-    username: str = "admin"
-    password: str
-
-
-# Для создания второго пользователя
-# user_id           - id пользователя на камере. Максимальное значение 16
-# username          - имя пользователя
-# password          - пароль от учётки пользователя
-# userLevel         - тип учётной записи. Возможные варианты: Administrator, Operator, Viewer
-class UserData(BaseModel):
-    user_id: int = 2
-    username: str
-    password: str
-    userLevel: str
-
-
-# Для полной настройки камеры
-# rtsp_ip           - ip адрес камеры которая будет настраиваться
-# admin_data        - данные об админской учётке
-# user_data         - данные об учётке пользователя
-# ntp               - данные для настройки NTP
-# timezone          - часовой пояс
-# stream            - данные для настройки Video и Audio конфигурации
-# channel_name      - вкл/выкл отображение названия камеры на потоке
-# email             - настройка smtp для отправки детекции
-# detection         - для установки стандартной маски
-
-class IncomingData(BaseModel):
-    rtsp_ip: str
-    admin_data: AdminData
-    user_data: UserData
-    user_permission: UserPermission
-    ntp: NtpData
-    timezone: TimeZone
-    stream: StreamData
-    channel_name: ChannelName
-    email: EmailData
-    dns: DnsData
-    detection: DetectionData
-
-
-# Для смены маски детекции
-class ChangeMaskData(BaseModel):
-    rtsp_ip: str
-    username: str = "admin"
-    password: str = "tvmix333"
-    maskFromLK: str
-
-
-class InitData(BaseModel):
-    rtsp_ip: str
-    admin_data: AdminData
-
-
 if __name__ == '__main__':
-    app.run(debug=True)
+    uvicorn.run(app, host="127.0.0.1", port=5000)
