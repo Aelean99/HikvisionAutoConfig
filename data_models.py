@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, validator
 from typing import Optional, List
 
 
@@ -156,6 +156,10 @@ class MotionDetectionLayout(BaseModel):
     layout: Layout
 
 
+class MotionDetectionLayoutData(BaseModel):
+    MotionDetectionLayout: MotionDetectionLayout
+
+
 class MotionDetectionData(BaseModel):
     enabled: bool
     enableHighlight: bool
@@ -299,8 +303,22 @@ class GetData(BaseModel):
 
 
 # Для смены маски детекции
-class ChangeMaskData(BaseModel):
+class SetMaskData(BaseModel):
     rtsp_ip: str
     username: str
     password: str
-    maskFromLK: str
+    gridMap: str
+
+    @validator("gridMap")
+    def len_grid_map(cls, v):
+        if len(v) < 396:
+            raise ValueError("Value less than 396")
+        elif len(v) > 396:
+            raise ValueError("Value greater than 396")
+        return v
+
+
+class GetMaskData(BaseModel):
+    rtsp_ip: str
+    username: str
+    password: str

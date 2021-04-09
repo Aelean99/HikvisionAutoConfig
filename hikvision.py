@@ -850,10 +850,33 @@ class Client:
             log.debug("Ошибка запроса", e.response)
             return StatusCode.UnhandledExceptionError
 
+    def _get_detection_mask(self):
+        try:
+            response = self.get("System/Video/inputs/channels/1/motionDetection/layout", auth=self.auth_type)
+            json_response = to_json(response)
+            mdd = MotionDetectionLayoutData(**json_response)
+            mask = [*mdd.MotionDetectionLayout.layout.gridMap]
+            mask_for_lk = []
+            for index, value in enumerate(mask, start=1):
+                if index % 6 == 0:
+                    mask_for_lk.append(bin(int(value, 16))[2:-2])
+                else:
+                    mask_for_lk.append(bin(int(value, 16))[2:])
+            return {"gridMap": str.join("", mask_for_lk)}
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
+
     # Цель метода - сменить маску детекции на камере, когда клиент её поменял через ЛК
     # На вход должна поступить маска детекции в виде строки из 396 символов.
     # Значение символа: либо 1 либо 0. Если 1 - значит ячейка в ЛК активирована, и её нужно отрисовать на камере
-    def change_detection_mask(self, data):
+    def _set_detection_mask(self, data):
         # mask_from_lk = \
         #     "1111111111111111111111" \
         #     "1111111111111111111111" \
@@ -883,7 +906,7 @@ class Client:
         grid_for_cam = []  # Маска для камеры, будет вычислена далее в коде
 
         try:
-            array_22chars = wrap(data.maskFromLK, 22)  # массив в ввиде ['1111111111111111111111']
+            array_22chars = wrap(data.gridMap, 22)  # массив в ввиде ['1111111111111111111111']
             for sub_array in array_22chars:
                 array_4chars = wrap(sub_array, 4)  # массив в виде ['1111', '1111', '1111', '1111', '1111', '11']
                 for sub_array1 in array_4chars:  # '1111'
@@ -984,8 +1007,8 @@ class Client:
 
     # Метод смены маски детекции
     @staticmethod
-    @app.post("/setMask")
-    async def set_detection_mask(inc_data: ChangeMaskData):
+    @app.post("/getMask")
+    async def get_detection_mask(inc_data: GetMaskData):
         log.debug(f"Incoming data: {inc_data}")
 
         a = Client(inc_data.rtsp_ip,
@@ -994,7 +1017,32 @@ class Client:
         try:
             auth_status = a.user_check()
             if auth_status == StatusCode.OK:
-                return a.change_detection_mask(inc_data)
+                return a._get_detection_mask()
+            else:
+                return auth_status
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
+
+    # Метод смены маски детекции
+    @staticmethod
+    @app.post("/setMask")
+    async def set_detection_mask(inc_data: SetMaskData):
+        log.debug(f"Incoming data: {inc_data}")
+
+        a = Client(inc_data.rtsp_ip,
+                   inc_data.username,
+                   inc_data.password)
+        try:
+            auth_status = a.user_check()
+            if auth_status == StatusCode.OK:
+                return a._set_detection_mask(inc_data)
             else:
                 return auth_status
         except ex.ConnectTimeout:
@@ -1083,6 +1131,7 @@ class Client:
                     users.dict(),
                     user_permission.dict()
                 )
+                print(a.get_detection_mask())
                 for x in methods_list:
                     response.update(x)
                 return response
