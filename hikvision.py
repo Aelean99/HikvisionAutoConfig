@@ -8,12 +8,10 @@ import requests.exceptions as ex
 import uvicorn
 import xmltodict
 from fastapi import FastAPI
-from pydantic import BaseModel
 from requests import session
 from requests.auth import HTTPBasicAuth, HTTPDigestAuth
 
-from data_models \
-    import Stream, TwoWayAudioChannel, Notifications, Detection, OsdCN, OsdDT, Email, Ethernet, Ntp, Time, UserList
+from data_models import *
 
 app = FastAPI()
 
@@ -24,159 +22,6 @@ console_handler = logging.StreamHandler(sys.stdout)
 console_handler.setLevel(logging.DEBUG)
 console_handler.setFormatter(logging.Formatter('[%(asctime)s %(filename)s:%(lineno)d] %(levelname)-8s %(message)s'))
 log.addHandler(console_handler)
-
-
-class GetData(BaseModel):
-    rtsp_ip: str
-    username: str = "admin"
-    password: str = "tvmix333"
-    user_id: int = 1
-
-
-# Для настройки видео-аудио потоков
-class StreamData(BaseModel):
-    videoCodecType: str = "H.264"
-    videoResolutionWidth: int = 1280
-    videoResolutionHeight: int = 720
-    videoQualityControlType: str = "VBR"
-    fixedQuality: int = 100
-    vbrUpperCap: int = 1024
-    maxFrameRate: int = 1200
-    GovLength: int = 20
-    mic: bool = False
-    audioCompressionType: str = "MP2L2"
-    audioBitRate: int = 128
-
-
-# Для настройки NTP
-class NtpData(BaseModel):
-    ntp_ip: str
-    hostName: str
-    ntp_format: str = "ipaddress"  # or "hostName"
-
-
-# Установка часового пояса
-class TimeZone(BaseModel):
-    timezone: str = "CST-5:00:00"
-
-
-# Для выключения отображения имени канала на потоке
-class ChannelName(BaseModel):
-    is_enabled: bool = False
-
-
-# Для настройки SMTP(EMAIL)
-class EmailData(BaseModel):
-    portNo: int
-    hostName: str
-    addressingFormatType: str
-
-
-# Для смены DNS
-class DnsData(BaseModel):
-    dns = ["", ""]
-
-
-# userID                - id пользователя
-# userType              - admin, operator, viewer
-# playBack              - воспроизвение архива с флешки
-# preview               - онлайн просмотр
-# record                - Ручная запись
-# ptzControl            - управление PTZ
-# upgrade               - обновление/форматирование
-# parameterConfig       - изменение параметров камеры, битрейт, звук и тп
-# restartOrShutdown     - выключение и перезагрузка
-# logOrStateCheck       - Поиск по логам, чтение статуса
-# voiceTalk             - двусторонний звук(передать голос на динамик камеры)
-# transParentChannel    - настройка последовательного порта
-# contorlLocalOut(не помарк       - настройка видео-выхода
-# alarmOutOrUpload      - центр уведомлений/тревожные выходы
-class UserPermission(BaseModel):
-    userID: int
-    userType: str
-    playBack: bool
-    preview: bool
-    record: bool
-    ptzControl: bool
-    upgrade: bool
-    parameterConfig: bool
-    restartOrShutdown: bool
-    logOrStateCheck: bool
-    voiceTalk: bool
-    transParentChannel: bool
-    contorlLocalOut: bool
-    alarmOutOrUpload: bool
-
-
-# Для настройки default маски детекции
-# sensitivityLevel  - чувствительность детекции
-# gridMap           - готовая маска для настройки области детекции
-class DetectionData(BaseModel):
-    sensitivityLevel: int
-    gridMap: str = "fffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffcfffffc"
-
-
-# Для инициализации конструктора
-# user_id           - id пользователя на камере. Учётная запись admin ВСЕГДА имеет user_id = 1
-# username          - имя пользователя, по умолчанию admin
-# password          - пароль от учётки admin
-class AdminData(BaseModel):
-    user_id: int = 1
-    username: str = "admin"
-    password: str
-
-
-# Для создания второго пользователя
-# user_id           - id пользователя на камере. Максимальное значение 16
-# username          - имя пользователя
-# password          - пароль от учётки пользователя
-# userLevel         - тип учётной записи. Возможные варианты: Administrator, Operator, Viewer
-class UserData(BaseModel):
-    user_id: int = 2
-    username: str
-    password: str
-    userLevel: str
-
-
-class AudioData(BaseModel):
-    audioCompressionType: str
-    microphoneVolume: int
-    noisereduce: bool
-    audioBitRate: int
-    audioInputType: str
-
-
-# Для полной настройки камеры
-# rtsp_ip           - ip адрес камеры которая будет настраиваться
-# admin_data        - данные об админской учётке
-# user_data         - данные об учётке пользователя
-# ntp               - данные для настройки NTP
-# timezone          - часовой пояс
-# stream            - данные для настройки Video и Audio конфигурации
-# channel_name      - вкл/выкл отображение названия камеры на потоке
-# email             - настройка smtp для отправки детекции
-# detection         - для установки стандартной маски
-class IncomingData(BaseModel):
-    rtsp_ip: str
-    admin_data: AdminData
-    user_data: UserData
-    user_permission: UserPermission
-    ntp: NtpData
-    timezone: TimeZone
-    stream: StreamData
-    audio: AudioData
-    channel_name: ChannelName
-    email: EmailData
-    dns: DnsData
-    detection: DetectionData
-
-
-# Для смены маски детекции
-class ChangeMaskData(BaseModel):
-    rtsp_ip: str
-    username: str = "admin"
-    password: str = "tvmix333"
-    maskFromLK: str
 
 
 class StatusCode:
@@ -453,6 +298,20 @@ class Client:
             log.debug("Ошибка запроса", e.response)
             return StatusCode.UnhandledExceptionError
 
+    def get_user_permission(self):
+        try:
+            response = self.get(f"Security/UserPermission", auth=self.auth_type)
+            return to_json(response)
+        except ex.ConnectTimeout:
+            log.debug("Камера не пингуется")
+            return StatusCode.NotPing
+        except ex.ConnectionError:
+            log.debug("Ошибка соединения с камерой")
+            return StatusCode.ConnectionError
+        except ex.RequestException as e:
+            log.debug("Ошибка запроса", e.response)
+            return StatusCode.UnhandledExceptionError
+
     def get_audio_config(self):
         try:
             response = self.get("System/TwoWayAudio/channels/1", auth=self.auth_type)
@@ -634,14 +493,15 @@ class Client:
 
     # Сменить DNS
     def set_eth_config(self, data):
-        current_eth_data = self.get_eth_config()
-        addressing_type = current_eth_data['IPAddress']['addressingType']
+        current_eth_data = IPAddress(**self.get_eth_config())
 
-        if addressing_type != "static":
-            return f"Addressing type is {addressing_type}. Can`t set DNS"
-        ip_address = current_eth_data['IPAddress']['ipAddress']
-        subnet_mask = current_eth_data['IPAddress']['subnetMask']
-        gateway = current_eth_data['IPAddress']['DefaultGateway']['ipAddress']
+        if current_eth_data.IPAddress.addressingType != "static":
+            return f"Addressing type is {current_eth_data.IPAddress.addressingType}. Can`t set DNS"
+        ip_address = current_eth_data.IPAddress.ipAddress
+        subnet_mask = current_eth_data.IPAddress.subnetMask
+        gateway = current_eth_data.IPAddress.DefaultGateway.ipAddress
+        dns1 = data.PrimaryDNS.ipAddress
+        dns2 = data.SecondaryDNS.ipAddress
 
         xml_data = f'''<IPAddress>
                             <ipVersion>v4</ipVersion>
@@ -652,10 +512,10 @@ class Client:
                                 <ipAddress>{gateway}</ipAddress>
                             </DefaultGateway>
                             <PrimaryDNS>
-                                <ipAddress>{data.dns[0]}</ipAddress>
+                                <ipAddress>{dns1}</ipAddress>
                             </PrimaryDNS>
                             <SecondaryDNS>
-                                <ipAddress>{data.dns[1]}</ipAddress>
+                                <ipAddress>{dns2}</ipAddress>
                             </SecondaryDNS>
                             <Ipv6Mode>
                                 <ipV6AddressingType>ra</ipV6AddressingType>
@@ -690,19 +550,17 @@ class Client:
         xml_data = f'''
             <StreamingChannel>
                 <Video>
-                    <videoCodecType>{data.videoCodecType}</videoCodecType>
-                    <videoResolutionWidth>{data.videoResolutionWidth}</videoResolutionWidth>
-                    <videoResolutionHeight>{data.videoResolutionHeight}</videoResolutionHeight>
-                    <videoQualityControlType>{data.videoQualityControlType}</videoQualityControlType>
-                    <fixedQuality>{data.fixedQuality}</fixedQuality>
-                    <vbrUpperCap>{data.vbrUpperCap}</vbrUpperCap>
-                    <maxFrameRate>{data.maxFrameRate}</maxFrameRate>
-                    <GovLength>{data.GovLength}</GovLength>
+                    <videoCodecType>{data.Video.videoCodecType}</videoCodecType>
+                    <videoResolutionWidth>{data.Video.videoResolutionWidth}</videoResolutionWidth>
+                    <videoResolutionHeight>{data.Video.videoResolutionHeight}</videoResolutionHeight>
+                    <videoQualityControlType>{data.Video.videoQualityControlType}</videoQualityControlType>
+                    <fixedQuality>{data.Video.fixedQuality}</fixedQuality>
+                    <vbrUpperCap>{data.Video.vbrUpperCap}</vbrUpperCap>
+                    <maxFrameRate>{data.Video.maxFrameRate}</maxFrameRate>
+                    <GovLength>{data.Video.GovLength}</GovLength>
                 </Video>
                 <Audio>
-                    <enabled>{str(data.mic).lower()}</enabled>
-                    <audioCompressionType>{data.audioCompressionType}</audioCompressionType>
-                    <audioBitRate>{data.audioBitRate}</audioBitRate>
+                    <enabled>{str(data.Audio.enabled).lower()}</enabled>
                 </Audio>
             </StreamingChannel>'''
 
@@ -758,20 +616,21 @@ class Client:
         if device_info is None:
             return StatusCode.EmptyResponse
         serial_number = device_info['DeviceInfo']['serialNumber']
-        cam_email = f"HK-{serial_number}@camera.ru"
+        data.sender.emailAddress = f"HK-{serial_number}@camera.ru"
         xml_data = f'''
                 <mailing>
                     <id>1</id>
                     <sender>
-                        <emailAddress>{cam_email}</emailAddress>
-                        <name>camera</name>
+                        <name>{data.sender.name}</name>
+                        <emailAddress>{data.sender.emailAddress}</emailAddress>
                         <smtp>
-                            <enableAuthorization>false</enableAuthorization>
-                            <enableSSL>false</enableSSL>
-                            <addressingFormatType>{data.addressingFormatType}</addressingFormatType>
-                            <hostName>{data.hostName}</hostName>
-                            <portNo>{data.portNo}</portNo>
-                            <accountName></accountName>
+                            <enableAuthorization>{str(data.sender.smtp.enableAuthorization).lower()}</enableAuthorization>
+                            <enableSSL>{str(data.sender.smtp.enableSSL).lower()}</enableSSL>
+                            <addressingFormatType>{data.sender.smtp.addressingFormatType}</addressingFormatType>
+                            <hostName>{data.sender.smtp.hostName}</hostName>
+                            <portNo>{data.sender.smtp.portNo}</portNo>
+                            <accountName>{data.sender.smtp.accountName}</accountName>
+                            <password>{data.sender.smtp.password}</password>
                             <enableTLS>false</enableTLS>
                             <startTLS>false</startTLS>
                         </smtp>
@@ -779,13 +638,13 @@ class Client:
                     <receiverList>
                         <receiver>
                             <id>1</id>
-                            <name>camera</name>
-                            <emailAddress>{cam_email}</emailAddress>
+                            <name>{data.sender.name}</name>
+                            <emailAddress>{data.sender.emailAddress}</emailAddress>
                         </receiver>
                     </receiverList>
                     <attachment>
                         <snapshot>
-                            <enabled>false</enabled>
+                            <enabled>{str(data.attachment.snapshot.enabled).lower()}</enabled>
                             <interval>2</interval>
                         </snapshot>
                     </attachment>
@@ -809,11 +668,11 @@ class Client:
         xml_data = f'''
             <NTPServer>
                 <id>1</id>
-                <addressingFormatType>{data.ntp_format}</addressingFormatType>
+                <addressingFormatType>{data.addressingFormatType}</addressingFormatType>
                 <hostName>{data.hostName}</hostName>
-                <ipAddress>{data.ntp_ip}</ipAddress>
-                <portNo>123</portNo>
-                <synchronizeInterval>30</synchronizeInterval>
+                <ipAddress>{data.ipAddress}</ipAddress>
+                <portNo>{data.portNo}</portNo>
+                <synchronizeInterval>{data.synchronizeInterval}</synchronizeInterval>
             </NTPServer>'''
         try:
             response = self.put("System/time/NtpServers/1", data=xml_data, auth=self.auth_type)
@@ -833,8 +692,8 @@ class Client:
     def set_time_config(self, data):
         xml_data = f'''
             <Time>
-                <timeMode>NTP</timeMode>
-                <timeZone>{data.timezone}</timeZone>
+                <timeMode>{data.timeMode}</timeMode>
+                <timeZone>{data.timeZone}</timeZone>
             </Time>
         '''
 
@@ -856,7 +715,7 @@ class Client:
     def set_osd_channel_config(self, data):
         xml_data = f'''
         <channelNameOverlay>
-            <enabled>{str(data.is_enabled).lower()}</enabled>
+            <enabled>{str(data.enabled).lower()}</enabled>
             <positionX>512</positionX>
             <positionY>64</positionY>
         </channelNameOverlay>
@@ -878,15 +737,15 @@ class Client:
             return StatusCode.UnhandledExceptionError
 
     # Включить отображение времени на видео-потоке
-    def set_osd_datetime_config(self):
-        xml_data = '''
+    def set_osd_datetime_config(self, data):
+        xml_data = f'''
         <DateTimeOverlay>
-            <enabled>true</enabled>
+            <enabled>{str(data.enabled).lower()}</enabled>
             <positionX>0</positionX>
             <positionY>544</positionY>
-            <dateStyle>DD-MM-YYYY</dateStyle>
-            <timeStyle>24hour</timeStyle>
-            <displayWeek>false</displayWeek>
+            <dateStyle>{data.dateStyle}</dateStyle>
+            <timeStyle>{data.timeStyle}</timeStyle>
+            <displayWeek>{str(data.displayWeek).lower()}</displayWeek>
         </DateTimeOverlay> 
         '''
         try:
@@ -906,13 +765,13 @@ class Client:
 
     # Настроить способ отправки обнаруженных алармов
     # В данном случае замеченная детекция будет отправлять на email
-    def set_alarm_notifications_config(self):
-        xml_data = '''
+    def set_alarm_notifications_config(self, data):
+        xml_data = f'''
         <EventTriggerNotificationList>
             <EventTriggerNotification>
-                <id>email</id>
-                <notificationMethod>email</notificationMethod>
-                <notificationRecurrence>recurring</notificationRecurrence>
+                <id>{data.EventTriggerNotification.id}</id>
+                <notificationMethod>{data.EventTriggerNotification.notificationMethod}</notificationMethod>
+                <notificationRecurrence>{data.EventTriggerNotification.notificationRecurrence}</notificationRecurrence>
             </EventTriggerNotification>
         </EventTriggerNotificationList>
         '''
@@ -942,8 +801,8 @@ class Client:
     def set_detection_config(self, data):
         xml_data = f'''
         <MotionDetection>
-            <enabled>true</enabled>
-            <enableHighlight>false</enableHighlight>
+            <enabled>{str(data.enabled).lower()}</enabled>
+            <enableHighlight>{str(data.enableHighlight).lower()}</enableHighlight>
             <samplingInterval>2</samplingInterval>
             <startTriggerTime>500</startTriggerTime>
             <endTriggerTime>500</endTriggerTime>
@@ -953,9 +812,9 @@ class Client:
                 <columnGranularity>22</columnGranularity>
             </Grid>
             <MotionDetectionLayout>
-                <sensitivityLevel>{data.sensitivityLevel}</sensitivityLevel>
+                <sensitivityLevel>{data.MotionDetectionLayout.sensitivityLevel}</sensitivityLevel>
                 <layout>
-                    <gridMap>{data.gridMap}</gridMap>
+                    <gridMap>{data.MotionDetectionLayout.layout.gridMap}</gridMap>
                 </layout>
             </MotionDetectionLayout>
         </MotionDetection>
@@ -1067,9 +926,9 @@ class Client:
     def user_create(self, data):
         try:
             xml_data = f'''<User>
-                            <userName>{data.username}</userName>
-                            <password>{data.password}</password>
-                            <userLevel>{data.userLevel}</userLevel>
+                            <userName>{data.User.userName}</userName>
+                            <password>{data.User.password}</password>
+                            <userLevel>{data.User.userLevel}</userLevel>
                         </User>'''
             response = self.post("Security/users", data=xml_data, auth=self.auth_type)
             json_response = to_json(response)
@@ -1089,27 +948,28 @@ class Client:
     # Настройка прав пользователя
     def set_user_permissions(self, data):
         try:
+            user_id = data.UserPermission.id
             xml_data = f'''<UserPermission>
-                        <id>{data.userID}</id>
-                        <userID>{data.userID}</userID>
-                        <userType>{data.userType}</userType>
+                        <id>{data.UserPermission.id}</id>
+                        <userID>{data.UserPermission.userID}</userID>
+                        <userType>{data.UserPermission.userType}</userType>
                         <remotePermission>
-                            <playBack>{str(data.playBack).lower()}</playBack>
-                            <preview>{str(data.preview).lower()}</preview>
-                            <record>{str(data.record).lower()}</record>
-                            <ptzControl>{str(data.ptzControl).lower()}</ptzControl>
-                            <upgrade>{str(data.upgrade).lower()}</upgrade>
-                            <parameterConfig>{str(data.parameterConfig).lower()}</parameterConfig>
-                            <restartOrShutdown>{str(data.restartOrShutdown).lower()}</restartOrShutdown>
-                            <logOrStateCheck>{str(data.logOrStateCheck).lower()}</logOrStateCheck>
-                            <voiceTalk>{str(data.voiceTalk).lower()}</voiceTalk>
-                            <transParentChannel>{str(data.transParentChannel).lower()}</transParentChannel>
-                            <contorlLocalOut>{str(data.contorlLocalOut).lower()}</contorlLocalOut>
-                            <alarmOutOrUpload>{str(data.alarmOutOrUpload).lower()}</alarmOutOrUpload>
+                            <playBack>{str(data.UserPermission.remotePermission.playBack).lower()}</playBack>
+                            <preview>{str(data.UserPermission.remotePermission.preview).lower()}</preview>
+                            <record>{str(data.UserPermission.remotePermission.record).lower()}</record>
+                            <ptzControl>{str(data.UserPermission.remotePermission.ptzControl).lower()}</ptzControl>
+                            <upgrade>{str(data.UserPermission.remotePermission.upgrade).lower()}</upgrade>
+                            <parameterConfig>{str(data.UserPermission.remotePermission.parameterConfig).lower()}</parameterConfig>
+                            <restartOrShutdown>{str(data.UserPermission.remotePermission.restartOrShutdown).lower()}</restartOrShutdown>
+                            <logOrStateCheck>{str(data.UserPermission.remotePermission.logOrStateCheck).lower()}</logOrStateCheck>
+                            <voiceTalk>{str(data.UserPermission.remotePermission.voiceTalk).lower()}</voiceTalk>
+                            <transParentChannel>{str(data.UserPermission.remotePermission.transParentChannel).lower()}</transParentChannel>
+                            <contorlLocalOut>{str(data.UserPermission.remotePermission.contorlLocalOut).lower()}</contorlLocalOut>
+                            <alarmOutOrUpload>{str(data.UserPermission.remotePermission.alarmOutOrUpload).lower()}</alarmOutOrUpload>
                         </remotePermission>
                     </UserPermission>'''
 
-            response = self.put(f"Security/UserPermission/{data.userID}", data=xml_data, auth=self.auth_type)
+            response = self.put(f"Security/UserPermission/{user_id}", data=xml_data, auth=self.auth_type)
             json_response = to_json(response)
             return check_cam_response(json_response)
         except ex.ConnectTimeout:
@@ -1158,23 +1018,22 @@ class Client:
         try:
             auth_status = a.user_check()
             if auth_status == StatusCode.OK:
-                big_cam_json = {
-                    "password": a.change_password(inc_data.admin_data),
-                    "user_create": a.user_create(inc_data.user_data),
-                    "user_permission": a.set_user_permissions(inc_data.user_permission),
-                    "email": a.set_email_config(inc_data.email),
-                    "ntp": a.set_ntp_config(inc_data.ntp),
-                    "dns": a.set_eth_config(inc_data.dns),
-                    "stream": a.set_stream_config(inc_data.stream),
-                    "audio": a.set_audio_config(inc_data.audio),
-                    "time": a.set_time_config(inc_data.timezone),
-                    "osd_channel": a.set_osd_channel_config(inc_data.channel_name),
-                    "osd_datetime": a.set_osd_datetime_config(),
-                    "alarm_notifications": a.set_alarm_notifications_config(),
-                    "detection": a.set_detection_config(inc_data.detection)
+                response = {
+                    "change_password": check_cam_response(a.change_password(inc_data.admin_data)),
+                    "Time": a.set_time_config(inc_data.Time),
+                    "NTPServer": a.set_ntp_config(inc_data.NTPServer),
+                    "IPAddress": a.set_eth_config(inc_data.IPAddress),
+                    "mailing": a.set_email_config(inc_data.mailing),
+                    "OsdDatetime": a.set_osd_datetime_config(inc_data.OsdDatetime),
+                    "channelNameOverlay": a.set_osd_channel_config(inc_data.channelNameOverlay),
+                    "MotionDetection": a.set_detection_config(inc_data.MotionDetection),
+                    "EventTriggerNotificationList": a.set_alarm_notifications_config(inc_data.EventTriggerNotificationList),
+                    "StreamingChannel": a.set_stream_config(inc_data.StreamingChannel),
+                    "TwoWayAudioChannel": a.set_audio_config(inc_data.TwoWayAudioChannel),
+                    "UserList": a.user_create(inc_data.UserList),
+                    "UserPermissionList": a.set_user_permissions(inc_data.UserPermissionList)
                 }
-                log.debug(json.dumps(big_cam_json, indent=4))
-                return big_cam_json
+                return response
             else:
                 return auth_status
         except ex.ConnectTimeout:
@@ -1199,33 +1058,34 @@ class Client:
         try:
             auth_status = a.user_check()
             if auth_status == StatusCode.OK:
-                time = Time(**a.get_time_config())
-                ntp = Ntp(**a.get_ntp_config())
-                eth = Ethernet(**a.get_eth_config())
-                email = Email(**a.get_email_config())
-                osd_datetime = OsdDT(**a.get_osd_datetime_config())
-                osd_channel_name = OsdCN(**a.get_osd_channel_name_config())
-                detection = Detection(**a.get_detection_config())
-                notifications = Notifications(**a.get_event_notification_config())
-                stream = Stream(**a.get_stream_config())
-                audio = TwoWayAudioChannel(**a.get_audio_config())
-                users = UserList(**a.get_users())
-                json_data = {
-                    "change_password": check_cam_response(a.change_password(get_data)),
-                    "time": time.Time.dict(),
-                    "ntp": ntp.NTPServer.dict(),
-                    "eth": eth.IPAddress.dict(),
-                    "email": email.mailing.dict(),
-                    "osd_datetime": osd_datetime.OsdDatetime.dict(),
-                    "osd_channel_name": osd_channel_name.channelNameOverlay.dict(),
-                    "detection": detection.MotionDetection.dict(),
-                    "notifications": notifications.EventTriggerNotificationList.EventTriggerNotification.dict(),
-                    "stream": stream.StreamingChannel.dict(),
-                    "audio": audio.dict(),
-                    "users": users.UserList.dict()
-                }
-                print(users)
-                return json_data
+                try:
+                    users = UserList(**a.get_users())
+                except ValidationError:
+                    users = UserListL(**a.get_users())
+                try:
+                    user_permission = UserPermissionList(**a.get_user_permission())
+                except ValidationError:
+                    user_permission = UserPermissionListL(**a.get_user_permission())
+
+                response = dict()
+
+                methods_list = (
+                    Time(**a.get_time_config()).dict(),
+                    NTPServer(**a.get_ntp_config()).dict(),
+                    IPAddress(**a.get_eth_config()).dict(),
+                    Mailing(**a.get_email_config()).dict(),
+                    OsdDatetime(**a.get_osd_datetime_config()).dict(),
+                    ChannelNameOverlay(**a.get_osd_channel_name_config()).dict(),
+                    MotionDetection(**a.get_detection_config()).dict(),
+                    EventTriggerNotificationList(**a.get_event_notification_config()).dict(),
+                    StreamingChannel(**a.get_stream_config()).dict(),
+                    TwoWayAudioChannel(**a.get_audio_config()).dict(),
+                    users.dict(),
+                    user_permission.dict()
+                )
+                for x in methods_list:
+                    response.update(x)
+                return response
             else:
                 return auth_status
         except ex.ConnectTimeout:
