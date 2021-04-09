@@ -7,6 +7,7 @@ from textwrap import wrap
 import requests.exceptions as ex
 import uvicorn
 import xmltodict
+from pydantic import ValidationError
 from fastapi import FastAPI
 from requests import session
 from requests.auth import HTTPBasicAuth, HTTPDigestAuth
