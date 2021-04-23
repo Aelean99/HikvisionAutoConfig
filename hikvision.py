@@ -1132,7 +1132,6 @@ class Client:
                     users.dict(),
                     user_permission.dict()
                 )
-                print(a.get_detection_mask())
                 for x in methods_list:
                     response.update(x)
                 return response
