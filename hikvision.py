@@ -4,13 +4,12 @@ import os
 import sys
 from textwrap import wrap
 
-import requests.exceptions as ex
 import uvicorn
 import xmltodict
+from aiohttp import ClientSession, BasicAuth, client_exceptions
+from fastapi import FastAPI, status
+from fastapi.responses import JSONResponse
 from pydantic import ValidationError
-from fastapi import FastAPI
-from requests import session
-from requests.auth import HTTPBasicAuth, HTTPDigestAuth
 
 from data_models import *
 
@@ -62,32 +61,35 @@ class StatusCode:
     RebootRequired = 905
 
 
-class Get:
+class GetAsync:
     def __init__(self, ip):
         self.ip = ip
 
-    def __call__(self, uri, auth):
-        return session().get(f"http://{self.ip}/ISAPI/{uri}", auth=auth)
+    async def __call__(self, uri, auth):
+        async with ClientSession() as client:
+            return await client.get(f"http://{self.ip}/ISAPI/{uri}", auth=auth)
 
 
-class Put:
+class putAsync:
     def __init__(self, ip):
         self.ip = ip
 
-    def __call__(self, uri, data, auth):
-        return session().put(f"http://{self.ip}/ISAPI/{uri}", data=data, auth=auth)
+    async def __call__(self, uri, data, auth):
+        async with ClientSession() as client:
+            return await client.put(f"http://{self.ip}/ISAPI/{uri}", data=data, auth=auth)
 
 
-class Post:
+class PostAsync:
     def __init__(self, ip):
         self.ip = ip
 
-    def __call__(self, uri, data, auth):
-        return session().post(f"http://{self.ip}/ISAPI/{uri}", data=data, auth=auth)
+    async def __call__(self, uri, data, auth):
+        async with ClientSession() as client:
+            return await client.post(f"http://{self.ip}/ISAPI/{uri}", data=data, auth=auth)
 
 
-def to_json(response):
-    xml_dict = xmltodict.parse(response.content)
+async def to_json(response):
+    xml_dict = xmltodict.parse(await response.text())
     json_response = dict(json.loads(json.dumps(xml_dict)))
     return json_response
 
@@ -134,45 +136,30 @@ class Client:
     def __init__(self, ip_address, user, password):
         self.ip_address = ip_address
         self.user = user
-        self.auth_type = "basic/digest"
-        self.put = Put(self.ip_address)
-        self.get = Get(self.ip_address)
-        self.post = Post(self.ip_address)
-        self.basic = HTTPBasicAuth(self.user, password)
-        self.digest = HTTPDigestAuth(self.user, password)
+        self.basic = BasicAuth(self.user, password)
+        self.putAsync = putAsync(self.ip_address)
+        self.getAsync = GetAsync(self.ip_address)
+        self.postAsync = PostAsync(self.ip_address)
 
     def __call__(self, password):
-        self.basic = HTTPBasicAuth(self.user, password)
-        self.digest = HTTPDigestAuth(self.user, password)
-
-    # Проверить тип авторизации
-    def check_auth_type(self):
-        r = self.get("Security/userCheck", auth=self.basic)
-        if "WWW-Authenticate" in r.headers:
-            self.auth_type = self.digest
-        else:
-            self.auth_type = self.basic
+        self.basic = BasicAuth(self.user, password)
 
     # Метод проверки текущего пароля на камеру
-    def user_check(self):
+    async def user_check(self):
         try:
-            # Проверяем тип авторизации, digest или basic
-            # Полученный результат записывается в конструкторе класса
-            self.check_auth_type()
-
             # проверяем текущий пароль на камере и конвертируем xml ответ камеры в json
-            r = self.get("Security/userCheck", auth=self.auth_type)
+            r = await self.getAsync("Security/userCheck", auth=self.basic)
 
             # если пароль из конструктора подошёл - возвращем 200
-            if r.status_code == 200 and "200" in r.text:
+            if r.status == 200 and "200" in await r.text():
                 log.debug("Auth: Success")
                 return StatusCode.OK
 
-            elif r.status_code == 401 or "401" in r.text:
-                r_json = to_json(r)
+            elif r.status == 401 or "401" in await r.text():
+                r_json = await to_json(r)
 
                 # если камера заблокирована из-за неуспешных попыток авторизации - не начинать перебор, вернуть ошибку
-                if "unlockTime" in r.text:
+                if "unlockTime" in await r.text():
                     log.debug(f"Camera is locked, unlock time {r_json['userCheck']['unlockTime']} sec.")
                     return StatusCode.Unauthorized
 
@@ -191,15 +178,15 @@ class Client:
                     self.__call__(password)
 
                     # проверяем новый пароль и конвертим ответ в json
-                    r = self.get("Security/userCheck", auth=self.auth_type)
-                    r_json = to_json(r)
+                    r = await self.getAsync("Security/userCheck", auth=self.basic)
+                    r_json = await to_json(r)
 
                     # если пароль из конструктора подошёл - возвращем 200
-                    if r.status_code == 200 and "200" in r.text:
+                    if r.status == 200 and "200" in await r.text():
                         log.debug("Auth: Success")
                         return StatusCode.OK
 
-                    elif r.status_code == 401 or "401" in r.text:
+                    elif r.status == 401 or "401" in await r.text():
                         # если камера заблокировалась из-за неуспешных попыток авторизации - прервать цикл,
                         # вернуть ошибку
                         if "unlockTime" in r.text:
@@ -207,32 +194,32 @@ class Client:
                             return StatusCode.Unauthorized
                         log.debug("Auth: Unauthorized")
 
-            elif r.status_code == 403:
+            elif r.status == 403:
                 log.debug("Auth: Forbidden(Camera is locked)")
                 return StatusCode.Locked
 
             # если на запрос вернулся статус 404 - то такого метода нет на устройстве
             # значит либо камера старая и не поддерживает такой метод, либо это не камера вовсе
-            elif r.status_code == 404:
+            elif r.status == 404:
                 log.debug("Auth: Device is not supported")
                 return StatusCode.MethodNotFound
             else:
-                log.debug(f"Auth: Default error. Response status code {r.status_code}")
-                return r.status_code
-        except ex.ConnectTimeout:
+                log.debug(f"Auth: Default error. Response status code {r.status}")
+                return r.status
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
     # Метод смены пароля
     # user_id = 1 //админская учётка.
     # user_id = 2 и тд остальные создаваеые пользователи
-    def change_password(self, data):
+    async def change_password(self, data):
         try:
             xml_data = f'''
             <User>
@@ -242,259 +229,259 @@ class Client:
             </User>
             '''
 
-            response = self.put(f"Security/users/{data.user_id}", data=xml_data, auth=self.auth_type)
-            return to_json(response)
-        except ex.ConnectTimeout:
+            response = await self.putAsync(f"Security/users/{data.user_id}", data=xml_data, auth=self.basic)
+            return await to_json(response)
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
     # Получить информацию о MAC адресе и серийном номере
-    def device_info(self):
+    async def device_info(self):
         try:
-            response = self.get("System/deviceInfo", auth=self.auth_type)
-            return to_json(response)
-        except ex.ConnectTimeout:
+            response = await self.getAsync("System/deviceInfo", auth=self.basic)
+            return await to_json(response)
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
-            raise StatusCode.NotPing
-        except ex.ConnectionError:
+            return StatusCode.NotPing
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
-            raise StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
-            raise StatusCode.UnhandledExceptionError
+            return StatusCode.ConnectionError
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
+            return StatusCode.UnhandledExceptionError
 
-    def get_users(self):
+    async def get_users(self):
         try:
-            response = self.get("Security/users", auth=self.auth_type)
-            return to_json(response)
-        except ex.ConnectTimeout:
+            response = await self.getAsync("Security/users", auth=self.basic)
+            return await to_json(response)
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
-            raise StatusCode.NotPing
-        except ex.ConnectionError:
+            return StatusCode.NotPing
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
-            raise StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
-            raise StatusCode.UnhandledExceptionError
+            return StatusCode.ConnectionError
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
+            return StatusCode.UnhandledExceptionError
 
     # Получить конфиг сети с камеры
     # ip, маска, шлюз и т.п
-    def get_eth_config(self):
+    async def get_eth_config(self):
         try:
-            response = self.get("System/Network/interfaces/1/ipAddress", auth=self.auth_type)
-            return to_json(response)
-        except ex.ConnectTimeout:
+            response = await self.getAsync("System/Network/interfaces/1/ipAddress", auth=self.basic)
+            return await to_json(response)
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
-    def get_user_permission(self):
+    async def get_user_permission(self):
         try:
-            response = self.get(f"Security/UserPermission", auth=self.auth_type)
-            return to_json(response)
-        except ex.ConnectTimeout:
+            response = await self.getAsync(f"Security/UserPermission", auth=self.basic)
+            return await to_json(response)
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
-    def get_audio_config(self):
+    async def get_audio_config(self):
         try:
-            response = self.get("System/TwoWayAudio/channels/1", auth=self.auth_type)
-            return to_json(response)
-        except ex.ConnectTimeout:
+            response = await self.getAsync("System/TwoWayAudio/channels/1", auth=self.basic)
+            return await to_json(response)
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
-    def get_stream_dynamic_cap(self):
+    async def get_stream_dynamic_cap(self):
         try:
-            response = self.get("Streaming/channels/101/dynamicCap", auth=self.auth_type)
-            return to_json(response)
-        except ex.ConnectTimeout:
+            response = await self.getAsync("Streaming/channels/101/dynamicCap", auth=self.basic)
+            return await to_json(response)
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
-    def get_stream_capabilities(self):
+    async def get_stream_capabilities(self):
         try:
-            response = self.get("Streaming/channels/101/capabilities", auth=self.auth_type)
-            return to_json(response)
-        except ex.ConnectTimeout:
+            response = await self.getAsync("Streaming/channels/101/capabilities", auth=self.basic)
+            return await to_json(response)
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
     # Получить настройки видео-аудио конфигурации
-    def get_stream_config(self):
+    async def get_stream_config(self):
         try:
-            response = self.get("Streaming/channels/101", auth=self.auth_type)
-            return to_json(response)
-        except ex.ConnectTimeout:
+            response = await self.getAsync("Streaming/channels/101", auth=self.basic)
+            return await to_json(response)
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
     # Получить настройки времени
-    def get_time_config(self):
+    async def get_time_config(self):
         try:
-            response = self.get("System/time", auth=self.auth_type)
-            return to_json(response)
-        except ex.ConnectTimeout:
+            response = await self.getAsync("System/time", auth=self.basic)
+            return await to_json(response)
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
     # Получить NTP конфиг
-    def get_ntp_config(self):
+    async def get_ntp_config(self):
         try:
-            response = self.get("System/time/NtpServers/1", auth=self.auth_type)
-            return to_json(response)
-        except ex.ConnectTimeout:
+            response = await self.getAsync("System/time/NtpServers/1", auth=self.basic)
+            return await to_json(response)
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
     # Получить SMTP конфиг
-    def get_email_config(self):
+    async def get_email_config(self):
         try:
-            response = self.get("System/Network/mailing/1", auth=self.auth_type)
-            return to_json(response)
-        except ex.ConnectTimeout:
+            response = await self.getAsync("System/Network/mailing/1", auth=self.basic)
+            return await to_json(response)
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
     # Получить конфиг детекции
-    def get_detection_config(self):
+    async def get_detection_config(self):
         try:
-            response = self.get("System/Video/inputs/channels/1/motionDetection", auth=self.auth_type)
-            return to_json(response)
-        except ex.ConnectTimeout:
+            response = await self.getAsync("System/Video/inputs/channels/1/motionDetection", auth=self.basic)
+            return await to_json(response)
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
     # Получить список wi-fi сетей которые видит устройство
-    def get_wifi_list(self):
+    async def get_wifi_list(self):
         try:
-            response = self.get("System/Network/interfaces/2/wireless/accessPointList", auth=self.auth_type)
-            return to_json(response)
-        except ex.ConnectTimeout:
+            response = await self.getAsync("System/Network/interfaces/2/wireless/accessPointList", auth=self.basic)
+            return await to_json(response)
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
     # Получить конфиг OSD времени
-    def get_osd_datetime_config(self):
+    async def get_osd_datetime_config(self):
         try:
-            response = self.get("System/Video/inputs/channels/1/overlays/dateTimeOverlay",
-                                auth=self.auth_type)
-            return to_json(response)
-        except ex.ConnectTimeout:
+            response = await self.getAsync("System/Video/inputs/channels/1/overlays/dateTimeOverlay",
+                                           auth=self.basic)
+            return await to_json(response)
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
     # Получить конфиг OSD имени устройства
-    def get_osd_channel_name_config(self):
+    async def get_osd_channel_name_config(self):
         try:
-            response = self.get("System/Video/inputs/channels/1/overlays/channelNameOverlay",
-                                auth=self.auth_type)
-            return to_json(response)
-        except ex.ConnectTimeout:
+            response = await self.getAsync("System/Video/inputs/channels/1/overlays/channelNameOverlay",
+                                           auth=self.basic)
+            return await to_json(response)
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
     # Получить конфиг отправки детекции
-    def get_event_notification_config(self):
+    async def get_event_notification_config(self):
         try:
-            response = self.get("Event/triggers/VMD-1/notifications", auth=self.auth_type)
-            return to_json(response)
-        except ex.ConnectTimeout:
+            response = await self.getAsync("Event/triggers/VMD-1/notifications", auth=self.basic)
+            return await to_json(response)
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
     # Сменить DNS
-    def set_eth_config(self, data):
-        current_eth_data = IPAddress(**self.get_eth_config())
+    async def set_eth_config(self, data):
+        current_eth_data = IPAddress(**await self.get_eth_config())
 
         if current_eth_data.IPAddress.addressingType != "static":
             return f"Addressing type is {current_eth_data.IPAddress.addressingType}. Can`t set DNS"
@@ -532,22 +519,21 @@ class Client:
                         </IPAddress>'''
 
         try:
-            response = self.put("System/Network/interfaces/1/ipAddress", data=xml_data, auth=self.auth_type)
-            json_response = to_json(response)
+            response = await self.putAsync("System/Network/interfaces/1/ipAddress", data=xml_data, auth=self.basic)
+            json_response = await to_json(response)
             return check_cam_response(json_response)
-
-        except ex.ConnectTimeout:
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
     # Настроить Video-Audio конфигурацию
-    def set_stream_config(self, data):
+    async def set_stream_config(self, data):
         xml_data = f'''
             <StreamingChannel>
                 <Video>
@@ -566,20 +552,20 @@ class Client:
             </StreamingChannel>'''
 
         try:
-            response = self.put("Streaming/channels/101", data=xml_data, auth=self.auth_type)
-            json_response = to_json(response)
+            response = await self.putAsync("Streaming/channels/101", data=xml_data, auth=self.basic)
+            json_response = await to_json(response)
             return check_cam_response(json_response)
-        except ex.ConnectTimeout:
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
-    def set_audio_config(self, data):
+    async def set_audio_config(self, data):
         xml_data = f'''
         <TwoWayAudioChannel>
             <id>1</id>
@@ -598,22 +584,22 @@ class Client:
         </TwoWayAudioChannel>
         '''
         try:
-            response = self.put("System/TwoWayAudio/channels/1", data=xml_data, auth=self.auth_type)
-            json_response = to_json(response)
+            response = await self.putAsync("System/TwoWayAudio/channels/1", data=xml_data, auth=self.basic)
+            json_response = await to_json(response)
             return check_cam_response(json_response)
-        except ex.ConnectTimeout:
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
     # Настроить SMTP
-    def set_email_config(self, data):
-        device_info = self.device_info()
+    async def set_email_config(self, data):
+        device_info = await self.device_info()
         if device_info is None:
             return StatusCode.EmptyResponse
         serial_number = device_info['DeviceInfo']['serialNumber']
@@ -651,21 +637,21 @@ class Client:
                     </attachment>
                 </mailing>'''
         try:
-            response = self.put("System/Network/mailing/1", data=xml_data, auth=self.auth_type)
-            json_response = to_json(response)
+            response = await self.putAsync("System/Network/mailing/1", data=xml_data, auth=self.basic)
+            json_response = await to_json(response)
             return check_cam_response(json_response)
-        except ex.ConnectTimeout:
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
     # Настроить NTP
-    def set_ntp_config(self, data):
+    async def set_ntp_config(self, data):
         xml_data = f'''
             <NTPServer>
                 <id>1</id>
@@ -676,21 +662,21 @@ class Client:
                 <synchronizeInterval>{data.synchronizeInterval}</synchronizeInterval>
             </NTPServer>'''
         try:
-            response = self.put("System/time/NtpServers/1", data=xml_data, auth=self.auth_type)
-            json_response = to_json(response)
+            response = await self.putAsync("System/time/NtpServers/1", data=xml_data, auth=self.basic)
+            json_response = await to_json(response)
             return check_cam_response(json_response)
-        except ex.ConnectTimeout:
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
     # Настроить время
-    def set_time_config(self, data):
+    async def set_time_config(self, data):
         xml_data = f'''
             <Time>
                 <timeMode>{data.timeMode}</timeMode>
@@ -699,21 +685,21 @@ class Client:
         '''
 
         try:
-            response = self.put("System/time", data=xml_data, auth=self.auth_type)
-            json_response = to_json(response)
+            response = await self.putAsync("System/time", data=xml_data, auth=self.basic)
+            json_response = await to_json(response)
             return check_cam_response(json_response)
-        except ex.ConnectTimeout:
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
     # Отключить отображение имени устройства на видео-потоке
-    def set_osd_channel_config(self, data):
+    async def set_osd_channel_config(self, data):
         xml_data = f'''
         <channelNameOverlay>
             <enabled>{str(data.enabled).lower()}</enabled>
@@ -723,22 +709,22 @@ class Client:
         '''
 
         try:
-            response = self.put("System/Video/inputs/channels/1/overlays/channelNameOverlay", data=xml_data,
-                                auth=self.auth_type)
-            json_response = to_json(response)
+            response = await self.putAsync("System/Video/inputs/channels/1/overlays/channelNameOverlay",
+                                           data=xml_data, auth=self.basic)
+            json_response = await to_json(response)
             return check_cam_response(json_response)
-        except ex.ConnectTimeout:
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
     # Включить отображение времени на видео-потоке
-    def set_osd_datetime_config(self, data):
+    async def set_osd_datetime_config(self, data):
         xml_data = f'''
         <DateTimeOverlay>
             <enabled>{str(data.enabled).lower()}</enabled>
@@ -750,23 +736,23 @@ class Client:
         </DateTimeOverlay> 
         '''
         try:
-            response = self.put("System/Video/inputs/channels/1/overlays/dateTimeOverlay",
-                                data=xml_data, auth=self.auth_type)
-            json_response = to_json(response)
+            response = await self.putAsync("System/Video/inputs/channels/1/overlays/dateTimeOverlay",
+                                           data=xml_data, auth=self.basic)
+            json_response = await to_json(response)
             return check_cam_response(json_response)
-        except ex.ConnectTimeout:
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
     # Настроить способ отправки обнаруженных алармов
     # В данном случае замеченная детекция будет отправлять на email
-    def set_alarm_notifications_config(self, data):
+    async def set_alarm_notifications_config(self, data):
         xml_data = f'''
         <EventTriggerNotificationList>
             <EventTriggerNotification>
@@ -783,23 +769,23 @@ class Client:
         #   notificationRecurrence <!—opt, xs:string, “beginning, beginningandend, recurring” 
 
         try:
-            response = self.put("Event/triggers/VMD-1/notifications",
-                                data=xml_data, auth=self.auth_type)
-            json_response = to_json(response)
+            response = await self.putAsync("Event/triggers/VMD-1/notifications",
+                                           data=xml_data, auth=self.basic)
+            json_response = await to_json(response)
             return check_cam_response(json_response)
-        except ex.ConnectTimeout:
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
     # Настройка конфигурации детекции движения
     # Включается функционал отлова движения, заполняется маска детекции
-    def set_detection_config(self, data):
+    async def set_detection_config(self, data):
         xml_data = f'''
         <MotionDetection>
             <enabled>{str(data.enabled).lower()}</enabled>
@@ -822,39 +808,40 @@ class Client:
         '''
 
         try:
-            response = self.put("System/Video/inputs/channels/1/motionDetection",
-                                data=xml_data, auth=self.auth_type)
-            json_response = to_json(response)
+            response = await self.putAsync("System/Video/inputs/channels/1/motionDetection",
+                                           data=xml_data, auth=self.basic)
+            json_response = await to_json(response)
             return check_cam_response(json_response)
-        except ex.ConnectTimeout:
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
-    def reboot(self):
+    async def reboot(self):
         try:
-            response = self.put("System/reboot", data="", auth=self.auth_type)
-            json_response = to_json(response)
+            response = await self.putAsync("System/reboot", data="", auth=self.basic)
+            json_response = await to_json(response)
             return check_cam_response(json_response)
-        except ex.ConnectTimeout:
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
-    def _get_detection_mask(self):
+    async def _get_detection_mask(self):
         try:
-            response = self.get("System/Video/inputs/channels/1/motionDetection/layout", auth=self.auth_type)
-            json_response = to_json(response)
+            response = await self.getAsync("System/Video/inputs/channels/1/motionDetection/layout",
+                                           auth=self.basic)
+            json_response = await to_json(response)
             mdd = MotionDetectionLayoutData(**json_response)
             mask = [*mdd.MotionDetectionLayout.layout.gridMap]
             mask_for_lk = []
@@ -864,20 +851,20 @@ class Client:
                 else:
                     mask_for_lk.append(bin(int(value, 16))[2:])
             return {"gridMap": str.join("", mask_for_lk)}
-        except ex.ConnectTimeout:
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
     # Цель метода - сменить маску детекции на камере, когда клиент её поменял через ЛК
     # На вход должна поступить маска детекции в виде строки из 396 символов.
     # Значение символа: либо 1 либо 0. Если 1 - значит ячейка в ЛК активирована, и её нужно отрисовать на камере
-    def _set_detection_mask(self, data):
+    async def _set_detection_mask(self, data):
         # mask_from_lk = \
         #     "1111111111111111111111" \
         #     "1111111111111111111111" \
@@ -931,46 +918,45 @@ class Client:
             </MotionDetectionGridLayout>
             '''
 
-            response = \
-                self.put("System/Video/inputs/channels/1/motionDetection/layout/gridLayout", data=xml_data,
-                         auth=self.auth_type)
-            json_response = to_json(response)
+            response = await self.putAsync("System/Video/inputs/channels/1/motionDetection/layout/gridLayout",
+                                           data=xml_data, auth=self.basic)
+            json_response = await to_json(response)
             return check_cam_response(json_response)
-        except ex.ConnectTimeout:
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
     # Метод создания пользователя
-    def user_create(self, data):
+    async def user_create(self, data):
         try:
             xml_data = f'''<User>
                             <userName>{data.User.userName}</userName>
                             <password>{data.User.password}</password>
                             <userLevel>{data.User.userLevel}</userLevel>
                         </User>'''
-            response = self.post("Security/users", data=xml_data, auth=self.auth_type)
-            json_response = to_json(response)
-            if response.status_code == StatusCode.DeviceError:
+            response = await self.postAsync("Security/users", data=xml_data, auth=self.basic)
+            json_response = await to_json(response)
+            if response.status == StatusCode.DeviceError:
                 return "User already created"
             return check_cam_response(json_response)
-        except ex.ConnectTimeout:
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
     # Настройка прав пользователя
-    def set_user_permissions(self, data):
+    async def set_user_permissions(self, data):
         try:
             user_id = data.UserPermission.id
             xml_data = f'''<UserPermission>
@@ -993,22 +979,22 @@ class Client:
                         </remotePermission>
                     </UserPermission>'''
 
-            response = self.put(f"Security/UserPermission/{user_id}", data=xml_data, auth=self.auth_type)
-            json_response = to_json(response)
+            response = await self.putAsync(f"Security/UserPermission/{user_id}", data=xml_data, auth=self.basic)
+            json_response = await to_json(response)
             return check_cam_response(json_response)
-        except ex.ConnectTimeout:
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
     # Метод смены маски детекции
     @staticmethod
-    @app.post("/getMask")
+    @app.post("/getMask", status_code=200)
     async def get_detection_mask(inc_data: GetMaskData):
         log.debug(f"Incoming data: {inc_data}")
 
@@ -1016,19 +1002,19 @@ class Client:
                    inc_data.username,
                    inc_data.password)
         try:
-            auth_status = a.user_check()
+            auth_status = await a.user_check()
             if auth_status == StatusCode.OK:
-                return a._get_detection_mask()
+                return await a._get_detection_mask()
             else:
-                return auth_status
-        except ex.ConnectTimeout:
+                return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content=auth_status)
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
     # Метод смены маски детекции
@@ -1041,19 +1027,19 @@ class Client:
                    inc_data.username,
                    inc_data.password)
         try:
-            auth_status = a.user_check()
+            auth_status = await a.user_check()
             if auth_status == StatusCode.OK:
-                return a._set_detection_mask(inc_data)
+                return await a._set_detection_mask(inc_data)
             else:
-                return auth_status
-        except ex.ConnectTimeout:
+                return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content=auth_status)
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
     @staticmethod
@@ -1065,34 +1051,35 @@ class Client:
                    inc_data.admin_data.username,
                    inc_data.admin_data.password)
         try:
-            auth_status = a.user_check()
+            auth_status = await a.user_check()
             if auth_status == StatusCode.OK:
                 response = {
-                    "change_password": check_cam_response(a.change_password(inc_data.admin_data)),
-                    "Time": a.set_time_config(inc_data.Time),
-                    "NTPServer": a.set_ntp_config(inc_data.NTPServer),
-                    "IPAddress": a.set_eth_config(inc_data.IPAddress),
-                    "mailing": a.set_email_config(inc_data.mailing),
-                    "OsdDatetime": a.set_osd_datetime_config(inc_data.OsdDatetime),
-                    "channelNameOverlay": a.set_osd_channel_config(inc_data.channelNameOverlay),
-                    "MotionDetection": a.set_detection_config(inc_data.MotionDetection),
-                    "EventTriggerNotificationList": a.set_alarm_notifications_config(inc_data.EventTriggerNotificationList),
-                    "StreamingChannel": a.set_stream_config(inc_data.StreamingChannel),
-                    "TwoWayAudioChannel": a.set_audio_config(inc_data.TwoWayAudioChannel),
-                    "UserList": a.user_create(inc_data.UserList),
-                    "UserPermissionList": a.set_user_permissions(inc_data.UserPermissionList)
+                    "change_password": check_cam_response(await a.change_password(inc_data.admin_data)),
+                    "Time": await a.set_time_config(inc_data.Time),
+                    "NTPServer": await a.set_ntp_config(inc_data.NTPServer),
+                    "IPAddress": await a.set_eth_config(inc_data.IPAddress),
+                    "mailing": await a.set_email_config(inc_data.mailing),
+                    "OsdDatetime": await a.set_osd_datetime_config(inc_data.OsdDatetime),
+                    "channelNameOverlay": await a.set_osd_channel_config(inc_data.channelNameOverlay),
+                    "MotionDetection": await a.set_detection_config(inc_data.MotionDetection),
+                    "EventTriggerNotificationList": await a.set_alarm_notifications_config(
+                        inc_data.EventTriggerNotificationList),
+                    "StreamingChannel": await a.set_stream_config(inc_data.StreamingChannel),
+                    "TwoWayAudioChannel": await a.set_audio_config(inc_data.TwoWayAudioChannel),
+                    "UserList": await a.user_create(inc_data.UserList),
+                    "UserPermissionList": await a.set_user_permissions(inc_data.UserPermissionList)
                 }
                 return response
             else:
-                return auth_status
-        except ex.ConnectTimeout:
+                return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content=auth_status)
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
     # Метод получения всей необходимой конфигурации с камеры
@@ -1105,30 +1092,30 @@ class Client:
                    get_data.username,
                    get_data.password)
         try:
-            auth_status = a.user_check()
+            auth_status = await a.user_check()
             if auth_status == StatusCode.OK:
                 try:
-                    users = UserList(**a.get_users())
+                    users = UserList(**await a.get_users())
                 except ValidationError:
-                    users = UserListL(**a.get_users())
+                    users = UserListL(**await a.get_users())
                 try:
-                    user_permission = UserPermissionList(**a.get_user_permission())
+                    user_permission = UserPermissionList(**await a.get_user_permission())
                 except ValidationError:
-                    user_permission = UserPermissionListL(**a.get_user_permission())
+                    user_permission = UserPermissionListL(**await a.get_user_permission())
 
                 response = dict()
 
                 methods_list = (
-                    Time(**a.get_time_config()).dict(),
-                    NTPServer(**a.get_ntp_config()).dict(),
-                    IPAddress(**a.get_eth_config()).dict(),
-                    Mailing(**a.get_email_config()).dict(),
-                    OsdDatetime(**a.get_osd_datetime_config()).dict(),
-                    ChannelNameOverlay(**a.get_osd_channel_name_config()).dict(),
-                    MotionDetection(**a.get_detection_config()).dict(),
-                    EventTriggerNotificationList(**a.get_event_notification_config()).dict(),
-                    StreamingChannel(**a.get_stream_config()).dict(),
-                    TwoWayAudioChannel(**a.get_audio_config()).dict(),
+                    Time(**await a.get_time_config()).dict(),
+                    NTPServer(**await a.get_ntp_config()).dict(),
+                    IPAddress(**await a.get_eth_config()).dict(),
+                    Mailing(**await a.get_email_config()).dict(),
+                    OsdDatetime(**await a.get_osd_datetime_config()).dict(),
+                    ChannelNameOverlay(**await a.get_osd_channel_name_config()).dict(),
+                    MotionDetection(**await a.get_detection_config()).dict(),
+                    EventTriggerNotificationList(**await a.get_event_notification_config()).dict(),
+                    StreamingChannel(**await a.get_stream_config()).dict(),
+                    TwoWayAudioChannel(**await a.get_audio_config()).dict(),
                     users.dict(),
                     user_permission.dict()
                 )
@@ -1136,15 +1123,15 @@ class Client:
                     response.update(x)
                 return response
             else:
-                return auth_status
-        except ex.ConnectTimeout:
+                return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content=auth_status)
+        except client_exceptions.ServerTimeoutError:
             log.debug("Камера не пингуется")
             return StatusCode.NotPing
-        except ex.ConnectionError:
+        except client_exceptions.ClientConnectionError:
             log.debug("Ошибка соединения с камерой")
             return StatusCode.ConnectionError
-        except ex.RequestException as e:
-            log.debug("Ошибка запроса", e.response)
+        except client_exceptions.ClientError:
+            log.debug("Ошибка запроса")
             return StatusCode.UnhandledExceptionError
 
 
