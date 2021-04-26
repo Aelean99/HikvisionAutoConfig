@@ -1103,6 +1103,7 @@ class Client:
                 except ValidationError:
                     user_permission = UserPermissionListL(**await a.get_user_permission())
 
+                serial = {"serial": DeviceInfo(**await a.device_info()).DeviceInfo.serialNumber }
                 response = dict()
 
                 methods_list = (
@@ -1117,7 +1118,8 @@ class Client:
                     StreamingChannel(**await a.get_stream_config()).dict(),
                     TwoWayAudioChannel(**await a.get_audio_config()).dict(),
                     users.dict(),
-                    user_permission.dict()
+                    user_permission.dict(),
+                    serial
                 )
                 for x in methods_list:
                     response.update(x)

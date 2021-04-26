@@ -302,6 +302,7 @@ class GetData(BaseModel):
     user_id: int
 
 
+##############################################
 # Для смены маски детекции
 class SetMaskData(BaseModel):
     rtsp_ip: str
@@ -318,7 +319,36 @@ class SetMaskData(BaseModel):
         return v
 
 
+##############################################
 class GetMaskData(BaseModel):
     rtsp_ip: str
     username: str
     password: str
+
+
+##############################################
+
+class DeviceInfoData(BaseModel):
+    deviceName: str
+    deviceID: str
+    deviceDescription: str
+    deviceLocation: str
+    systemContact: str
+    model: str
+    serialNumber: str
+    macAddress: str
+    firmwareVersion: str
+    firmwareReleasedDate: str
+    encoderVersion: str
+    encoderReleasedDate: str
+    bootVersion: str
+    bootReleasedDate: str
+    hardwareVersion: str
+    deviceType: str
+    telecontrolID: str
+    supportBeep: str
+    supportVideoLoss: str
+
+
+class DeviceInfo(BaseModel):
+    DeviceInfo: DeviceInfoData
