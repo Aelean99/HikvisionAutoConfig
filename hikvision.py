@@ -1103,7 +1103,9 @@ class Client:
                 except ValidationError:
                     user_permission = UserPermissionListL(**await a.get_user_permission())
 
-                serial = {"serial": DeviceInfo(**await a.device_info()).DeviceInfo.serialNumber }
+                serial = {"serial": DeviceInfo(**await a.device_info()).DeviceInfo.serialNumber}
+                motionDetection = MotionDetection(**await a.get_detection_config())
+                motionDetection.MotionDetection.MotionDetectionLayout.layout.gridMap = await a._get_detection_mask()
                 response = dict()
 
                 methods_list = (
@@ -1113,7 +1115,7 @@ class Client:
                     Mailing(**await a.get_email_config()).dict(),
                     OsdDatetime(**await a.get_osd_datetime_config()).dict(),
                     ChannelNameOverlay(**await a.get_osd_channel_name_config()).dict(),
-                    MotionDetection(**await a.get_detection_config()).dict(),
+                    motionDetection.dict(),
                     EventTriggerNotificationList(**await a.get_event_notification_config()).dict(),
                     StreamingChannel(**await a.get_stream_config()).dict(),
                     TwoWayAudioChannel(**await a.get_audio_config()).dict(),
