@@ -6,7 +6,7 @@ from textwrap import wrap
 
 import uvicorn
 import xmltodict
-from aiohttp import ClientSession, BasicAuth, client_exceptions
+from aiohttp import ClientSession, ClientTimeout, BasicAuth, client_exceptions
 from fastapi import FastAPI, status
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
@@ -64,28 +64,29 @@ class StatusCode:
 class GetAsync:
     def __init__(self, ip):
         self.ip = ip
+        self.client = ClientSession(timeout=ClientTimeout(30))
 
     async def __call__(self, uri, auth):
-        async with ClientSession() as client:
-            return await client.get(f"http://{self.ip}/ISAPI/{uri}", auth=auth)
+        #print(inspect.stack()[1].function)
+        return await self.client.get(f"http://{self.ip}/ISAPI/{uri}", auth=auth)
 
 
-class putAsync:
+class PutAsync:
     def __init__(self, ip):
         self.ip = ip
+        self.client = ClientSession(timeout=ClientTimeout(30))
 
     async def __call__(self, uri, data, auth):
-        async with ClientSession() as client:
-            return await client.put(f"http://{self.ip}/ISAPI/{uri}", data=data, auth=auth)
+        return await self.client.put(f"http://{self.ip}/ISAPI/{uri}", data=data, auth=auth)
 
 
 class PostAsync:
     def __init__(self, ip):
         self.ip = ip
+        self.client = ClientSession(timeout=ClientTimeout(30))
 
     async def __call__(self, uri, data, auth):
-        async with ClientSession() as client:
-            return await client.post(f"http://{self.ip}/ISAPI/{uri}", data=data, auth=auth)
+        return await self.client.post(f"http://{self.ip}/ISAPI/{uri}", data=data, auth=auth)
 
 
 async def to_json(response):
@@ -137,7 +138,7 @@ class Client:
         self.ip_address = ip_address
         self.user = user
         self.basic = BasicAuth(self.user, password)
-        self.putAsync = putAsync(self.ip_address)
+        self.putAsync = PutAsync(self.ip_address)
         self.getAsync = GetAsync(self.ip_address)
         self.postAsync = PostAsync(self.ip_address)
 
@@ -1093,6 +1094,7 @@ class Client:
                    get_data.password)
         try:
             auth_status = await a.user_check()
+
             if auth_status == StatusCode.OK:
                 try:
                     users = UserList(**await a.get_users())
