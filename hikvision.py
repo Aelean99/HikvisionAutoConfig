@@ -67,7 +67,7 @@ class GetAsync:
         self.client = ClientSession(timeout=ClientTimeout(30))
 
     async def __call__(self, uri, auth):
-        #print(inspect.stack()[1].function)
+        # print(inspect.stack()[1].function)
         return await self.client.get(f"http://{self.ip}/ISAPI/{uri}", auth=auth)
 
 
@@ -1106,8 +1106,8 @@ class Client:
                     user_permission = UserPermissionListL(**await a.get_user_permission())
 
                 serial = {"serial": DeviceInfo(**await a.device_info()).DeviceInfo.serialNumber}
-                motionDetection = MotionDetection(**await a.get_detection_config())
-                motionDetection.MotionDetection.MotionDetectionLayout.layout.gridMap = await a._get_detection_mask()
+                motion_detection = MotionDetection(**await a.get_detection_config())
+                motion_detection.MotionDetection.MotionDetectionLayout.layout = await a._get_detection_mask()
                 response = dict()
 
                 methods_list = (
@@ -1117,7 +1117,7 @@ class Client:
                     Mailing(**await a.get_email_config()).dict(),
                     OsdDatetime(**await a.get_osd_datetime_config()).dict(),
                     ChannelNameOverlay(**await a.get_osd_channel_name_config()).dict(),
-                    motionDetection.dict(),
+                    motion_detection.dict(),
                     EventTriggerNotificationList(**await a.get_event_notification_config()).dict(),
                     StreamingChannel(**await a.get_stream_config()).dict(),
                     TwoWayAudioChannel(**await a.get_audio_config()).dict(),
